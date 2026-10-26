@@ -11,10 +11,12 @@ requires-python = ">=3.12"
 dependencies = [
   "PySide6-Addons>=6.8,<7",
   "pydantic>=2.9,<3",
+  "openai>=3,<4",
 ]
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]
+audio = ["whisperx>=3.8.6,<3.9"]
 
 [project.scripts]
 prose-to-video = "prose_to_video.main:main"
