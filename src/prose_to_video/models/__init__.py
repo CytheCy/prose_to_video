@@ -1,0 +1,1 @@
+"""Validated application data models."""

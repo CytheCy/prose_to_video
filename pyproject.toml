@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prose-to-video"
+version = "0.1.0"
+description = "Desktop foundation for turning narrated prose into video projects"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "PySide6-Addons>=6.8,<7",
+  "pydantic>=2.9,<3",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+prose-to-video = "prose_to_video.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
