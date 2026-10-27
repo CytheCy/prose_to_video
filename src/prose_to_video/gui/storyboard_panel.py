@@ -70,6 +70,10 @@ class StoryboardPanel(QGroupBox):
     delete_requested = Signal()
     play_requested = Signal()
     export_requested = Signal()
+    add_visual_requested = Signal()
+    remove_visual_requested = Signal()
+    pin_reference_requested = Signal()
+    unpin_reference_requested = Signal()
     FIELDS = ("title", "visual_description", "foreground", "background", "environment",
               "character_actions", "camera_framing", "camera_angle", "camera_position", "lighting",
               "atmosphere", "transition", "suggested_motion", "ai_notes", "characters",
@@ -94,6 +98,11 @@ class StoryboardPanel(QGroupBox):
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setMinimumHeight(60)
         self.preview.setStyleSheet("background:#30343b;color:#ddd")
+        self.visual_references = QListWidget()
+        self.add_visual_button = QPushButton("Add Visual Entity…")
+        self.remove_visual_button = QPushButton("Remove Selected Entity")
+        self.pin_reference_button = QPushButton("Pin Approved Image…")
+        self.unpin_reference_button = QPushButton("Unpin Selected Image")
         self.original_prose = QPlainTextEdit(); self.original_prose.setReadOnly(True)
         self.original_prose.setPlaceholderText("Exact source passage")
         self.original_prose.setFixedHeight(75)
@@ -132,10 +141,20 @@ class StoryboardPanel(QGroupBox):
             actions.addWidget(button, i // 4, i % 4)
         layout = QVBoxLayout(self)
         layout.addLayout(top); layout.addWidget(self.status); layout.addWidget(self.timeline)
-        layout.addWidget(self.list_widget, 2); layout.addWidget(self.preview); layout.addWidget(scroll, 3); layout.addLayout(actions)
+        layout.addWidget(self.list_widget, 2); layout.addWidget(self.preview)
+        layout.addWidget(QLabel("Associated visual references")); layout.addWidget(self.visual_references)
+        visual_buttons = QGridLayout()
+        for index, button in enumerate((self.add_visual_button, self.remove_visual_button,
+                                        self.pin_reference_button, self.unpin_reference_button)):
+            visual_buttons.addWidget(button, index // 2, index % 2)
+        layout.addLayout(visual_buttons); layout.addWidget(scroll, 3); layout.addLayout(actions)
         layout.addWidget(self.original_prose)
         self.list_widget.currentRowChanged.connect(self._selected)
         self.timeline.selected.connect(self.select_id)
+        self.add_visual_button.clicked.connect(self.add_visual_requested)
+        self.remove_visual_button.clicked.connect(self.remove_visual_requested)
+        self.pin_reference_button.clicked.connect(self.pin_reference_requested)
+        self.unpin_reference_button.clicked.connect(self.unpin_reference_requested)
         for button, signal in ((self.generate_button,self.generate_requested),(self.generate_selected_button,self.generate_selected_requested),
             (self.generate_all_button,self.generate_all_requested),
             (self.cancel_button,self.cancel_requested),(self.settings_button,self.settings_requested),

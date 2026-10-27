@@ -127,6 +127,17 @@ class OpenAIProvider:
             scene_text, SceneDescription,
         )
 
+    def extract_entities(self, payload: str):
+        from prose_to_video.pipeline.entity_extraction import EntityProposals
+        return self._request(
+            "Identify recurring visual entities in this scene. Return names and categories. "
+            "Use exact manuscript quotes for explicit appearance facts; never invent a quote. "
+            "Use inferred or ai_proposed for uncertain details. Leave unknown appearance blank. "
+            "Known entity names and aliases are supplied as context. Reuse a known canonical name "
+            "only when narrative context clearly supports the same identity. Do not resolve ambiguous "
+            "identity by name similarity alone.",
+            payload, EntityProposals)
+
     def propose_shots(self, payload: str):
         from prose_to_video.pipeline.shot_planning import ShotIdeas
         return self._request(
@@ -140,6 +151,20 @@ class OpenAIProvider:
             "but do not invent major facts. Use only valid IDs and controlled shot types and camera "
             "movements. Do not return or invent timestamps.",
             payload, ShotIdeas)
+
+    def generate_image_prompt(self, payload: str):
+        from prose_to_video.pipeline.image_prompt_generation import PromptDraft
+        return self._request(
+            "Write structured instructions for ONE image of the selected storyboard shot. The exact "
+            "source prose and approved visual details are authoritative. Depict only the selected "
+            "moment; neighboring shots establish continuity but never authorize future reveals. "
+            "Preserve entity names, approved appearance, variant, spatial relationships, camera "
+            "framing, and visual style. Describe foreground, middle ground, background, environment, "
+            "actions, materials, light, and composition concretely where supported. Do not invent "
+            "major actions or characters. Keep uncertain facts unspecified and flag conflicts in "
+            "warnings. Reference-image metadata is context only; no image binaries are supplied. "
+            "Do not use proprietary image-model syntax. Negative prompt is optional.",
+            payload, PromptDraft)
 
 
 def make_provider(settings: AISettings) -> SceneProvider:

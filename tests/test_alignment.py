@@ -254,7 +254,7 @@ def test_migrate_v2_without_losing_scenes(tmp_path):
         connection.execute("PRAGMA user_version=2")
     assert len(session.database.load_scenes()[1]) == 2
     with sqlite3.connect(session.database.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
 
 
 def test_gui_scene_seek_and_prose_highlight(tmp_path):

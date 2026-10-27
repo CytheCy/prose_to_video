@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 from threading import Event
 from typing import Callable
@@ -21,6 +22,9 @@ from prose_to_video.gui.project_manager import NewProjectDialog, SettingsDialog
 from prose_to_video.gui.prose_viewer import ProseViewer
 from prose_to_video.gui.scenes_panel import ScenesPanel
 from prose_to_video.gui.storyboard_panel import StoryboardPanel
+from prose_to_video.gui.image_prompt_panel import ImagePromptPanel
+from prose_to_video.gui.image_prompt_settings import PromptSettingsDialog
+from prose_to_video.gui.visual_library_panel import VisualLibraryPanel
 from prose_to_video.gui.storyboard_settings import StoryboardSettingsDialog
 from prose_to_video.models.scene import Scene, source_hash
 from prose_to_video.models.alignment import AlignmentRun
@@ -29,6 +33,11 @@ from prose_to_video.pipeline.audio_transcription import (AlignmentCanceled, Tran
     dependency_check, source_file_hash)
 from prose_to_video.pipeline.audio_alignment import align_project
 from prose_to_video.pipeline.providers import make_provider
+from prose_to_video.pipeline.entity_extraction import extract_entities, reconcile_shot_links, ExtractionCanceled
+from prose_to_video.storage.visual_library import VisualLibrary
+from prose_to_video.storage.image_prompts import PromptStore
+from prose_to_video.storage.image_prompt_export import export_prompt_json, export_prompt_markdown
+from prose_to_video.pipeline.image_prompt_generation import generate_batch, PromptCanceled
 from prose_to_video.pipeline.shot_planning import PlanningCanceled, plan_scene
 from prose_to_video.pipeline.shot_editing import update_shot, split_shot, merge_shots, insert_shot, delete_shot, swap_visuals_with_next
 from prose_to_video.storage.storyboard_export import export_storyboard_json, export_storyboard_markdown
@@ -63,6 +72,38 @@ class FileTask(QThread):
         except Exception as exc:
             LOGGER.exception("Unexpected background task failure")
             self.failed.emit(f"Operation failed: {exc}")
+
+
+class PromptTask(QThread):
+    succeeded = Signal(object)
+    failed = Signal(str)
+    progress = Signal(int, int)
+
+    def __init__(self, shots, scenes, boards, root, project, settings, provider, source_path, regenerate=False, parent=None):
+        super().__init__(parent)
+        self.shots, self.scenes, self.boards = shots, scenes, boards
+        self.root, self.project, self.settings, self.provider = root, project, settings, provider
+        self.source_path, self.regenerate = source_path, regenerate
+        self.cancel_event = Event()
+
+    def run(self):
+        try:
+            from prose_to_video.utils.prose import read_prose
+            initial = source_hash(read_prose(self.source_path))
+            if any(board and board.prose_hash != initial for board in self.boards.values()):
+                raise ValueError('Storyboard prose is outdated')
+            def check():
+                if source_hash(read_prose(self.source_path)) != initial:
+                    raise ValueError('Prose changed during prompt generation')
+            result = generate_batch(self.shots, self.scenes, self.boards, VisualLibrary(self.root),
+                self.project, self.settings, self.provider, PromptStore(self.root),
+                regenerate=self.regenerate, cancel=self.cancel_event,
+                progress=lambda n,total: self.progress.emit(n,total), source_check=check)
+            self.succeeded.emit(result)
+        except PromptCanceled:
+            self.failed.emit('Prompt generation canceled; completed versions were saved')
+        except Exception as exc:
+            self.failed.emit(f'Prompt generation stopped: {type(exc).__name__}: {exc}')
 
 
 class SceneTask(QThread):
@@ -167,6 +208,34 @@ class StoryboardTask(QThread):
         except Exception as exc:
             self.failed.emit(str(exc))
 
+class EntityTask(QThread):
+    succeeded = Signal(object)
+    failed = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, scenes, library, provider, digest, source_path, chunk_chars, parent=None):
+        super().__init__(parent)
+        self.scenes, self.library, self.provider, self.digest = scenes, library, provider, digest
+        self.source_path, self.chunk_chars = source_path, chunk_chars
+        self.cancel_event = Event()
+
+    def run(self):
+        try:
+            result = extract_entities(self.scenes, self.library, self.provider,
+                cancel=self.cancel_event, manuscript_hash=self.digest,
+                chunk_chars=self.chunk_chars,
+                source_check=lambda: self._check_source(),
+                progress=lambda current, total: self.progress.emit(f'Extracting entities: {current}/{total} scenes'))
+            self.succeeded.emit(result)
+        except ExtractionCanceled:
+            self.failed.emit('Entity extraction canceled; completed scenes were preserved')
+        except Exception as exc:
+            self.failed.emit(f'Entity extraction failed: {exc}')
+
+    def _check_source(self):
+        if source_hash(read_prose(self.source_path)) != self.digest:
+            raise ValueError('Prose changed during entity extraction; current scene was not saved')
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -177,6 +246,8 @@ class MainWindow(QMainWindow):
         self._alignment_task: AlignmentTask | None = None
         self._waveform_task: WaveformTask | None = None
         self._storyboard_task: StoryboardTask | None = None
+        self._entity_task: EntityTask | None = None
+        self._prompt_task: PromptTask | None = None
         self._alignment: AlignmentRun | None = None
         self._cached_transcript = None
         self._last_alignment_settings: TranscriptionSettings | None = None
@@ -226,7 +297,7 @@ class MainWindow(QMainWindow):
         about_action = QAction("About", self)
         about_action.triggered.connect(lambda: QMessageBox.about(
             self, "About Prose to Video",
-            "Prose to Video — Stage Four\nScenes, local audio alignment, and visual storyboards."
+            "Prose to Video — Stage Five\nScenes, audio alignment, storyboards, and a Visual Library."
         ))
         help_menu.addAction(about_action)
 
@@ -282,9 +353,17 @@ class MainWindow(QMainWindow):
         horizontal.addWidget(prose_panel)
         self.scenes_panel = ScenesPanel()
         self.storyboard_panel = StoryboardPanel()
+        self.image_prompt_panel = ImagePromptPanel()
+        self.visual_library_panel = VisualLibraryPanel()
         self.workspace_tabs = QTabWidget()
         self.workspace_tabs.addTab(self.scenes_panel, "Scenes")
         self.workspace_tabs.addTab(self.storyboard_panel, "Storyboard")
+        self.workspace_tabs.addTab(self.visual_library_panel, "Visual Library")
+        self.workspace_tabs.addTab(self.image_prompt_panel, "Image Prompts")
+        self.visual_library_panel.extract_requested.connect(self._extract_entities)
+        self.visual_library_panel.cancel_requested.connect(self._cancel_entity_extraction)
+        self.visual_library_panel.changed.connect(self._visuals_changed)
+        self.visual_library_panel.style_override_requested.connect(self._visual_style_override)
         horizontal.addWidget(self.workspace_tabs)
         self.storyboard_panel.generate_requested.connect(lambda: self._generate_storyboards(False))
         self.storyboard_panel.generate_selected_requested.connect(self._choose_storyboard_scenes)
@@ -300,6 +379,17 @@ class MainWindow(QMainWindow):
         self.storyboard_panel.delete_requested.connect(self._delete_shot)
         self.storyboard_panel.play_requested.connect(self._play_shot)
         self.storyboard_panel.selected.connect(self._shot_selected)
+        self.image_prompt_panel.generate_requested.connect(self._generate_prompts)
+        self.image_prompt_panel.cancel_requested.connect(self._cancel_prompts)
+        self.image_prompt_panel.settings_requested.connect(self._prompt_settings)
+        self.image_prompt_panel.save_requested.connect(self._save_prompt)
+        self.image_prompt_panel.approve_requested.connect(self._approve_prompt)
+        self.image_prompt_panel.restore_requested.connect(self._restore_prompt)
+        self.image_prompt_panel.export_requested.connect(self._export_prompts)
+        self.storyboard_panel.add_visual_requested.connect(self._add_shot_visual)
+        self.storyboard_panel.remove_visual_requested.connect(self._remove_shot_visual)
+        self.storyboard_panel.pin_reference_requested.connect(self._pin_shot_reference)
+        self.storyboard_panel.unpin_reference_requested.connect(self._unpin_shot_reference)
         self.prose_viewer.selectionChanged.connect(self._prose_selection_changed)
         self.scenes_panel.detect_requested.connect(self._detect_scenes)
         self.scenes_panel.cancel_requested.connect(self._cancel_scenes)
@@ -336,7 +426,7 @@ class MainWindow(QMainWindow):
 
     def _refresh(self) -> None:
         session = self.session
-        busy = self._task is not None or self._scene_task is not None or self._alignment_task is not None or self._storyboard_task is not None
+        busy = self._task is not None or self._scene_task is not None or self._alignment_task is not None or self._storyboard_task is not None or self._entity_task is not None or self._prompt_task is not None
         for action in (self.new_action, self.open_action):
             action.setEnabled(not busy)
         for action in (self.save_action, self.close_action, self.settings_action):
@@ -405,6 +495,8 @@ class MainWindow(QMainWindow):
         self._alignment = None
         self._storyboard_stale = False
         self.storyboard_panel.set_board(None)
+        self.image_prompt_panel.set_prompt(None, [], None)
+        self.visual_library_panel.set_library(VisualLibrary(session.root) if session else None)
         self._cached_transcript = None
         self._highlighted_span = None
         self.scenes_panel.set_alignment(None)
@@ -1028,6 +1120,145 @@ class MainWindow(QMainWindow):
             self.prose_viewer.set_layer("shot", (shot.source_start, shot.source_end), scroll=True)
         else:
             self.prose_viewer.set_layer("shot", None)
+        self._refresh_shot_visuals()
+        self._load_prompt()
+
+    def _refresh_shot_visuals(self) -> None:
+        widget = self.storyboard_panel.visual_references
+        widget.clear()
+        shot = self.storyboard_panel.current_shot()
+        if not self.session or not shot: return
+        library = VisualLibrary(self.session.root)
+        for entity in library.entities_for_shot(shot.identifier):
+            refs = [r for r in library.references(entity.identifier) if r.status == 'Approved']
+            roles = ', '.join(f'{r.role}: {Path(library.asset(r.asset_id).path).name}' for r in refs if library.asset(r.asset_id))
+            item = f'{entity.name} · {entity.entity_type} · {roles or "No approved images"}'
+            widget.addItem(item)
+            widget.item(widget.count()-1).setData(Qt.UserRole, entity.identifier)
+            widget.item(widget.count()-1).setData(Qt.UserRole + 1, 'entity')
+        for asset in library.shot_assets(shot.identifier):
+            widget.addItem(f'Pinned image · {asset.path}')
+            widget.item(widget.count()-1).setData(Qt.UserRole, asset.identifier)
+            widget.item(widget.count()-1).setData(Qt.UserRole + 1, 'asset')
+
+    def _add_shot_visual(self):
+        shot = self.storyboard_panel.current_shot()
+        if not self.session or not shot: return
+        library = VisualLibrary(self.session.root)
+        entities = library.entities()
+        if not entities: return
+        labels = [f'{e.name} [{e.entity_type}, {e.identifier[:8]}]' for e in entities]
+        choice, ok = QInputDialog.getItem(self, 'Add Visual Entity', 'Entity:', labels, editable=False)
+        if not ok: return
+        entity = entities[labels.index(choice)]
+        variants = [v for v in library.variants(entity.identifier) if v.status == 'Approved']
+        options = ['Default', *[v.name for v in variants]]
+        selection, ok = QInputDialog.getItem(self, 'Appearance Variant', 'Use variant:', options, editable=False)
+        if not ok: return
+        variant_id = None if selection == 'Default' else variants[options.index(selection)-1].identifier
+        try:
+            library.relate_shot(entity.identifier, shot.identifier, variant_id)
+            self._refresh_shot_visuals(); self.visual_library_panel.refresh()
+        except (ValueError, ProjectDatabaseError) as exc: self._show_error('Visual reference', str(exc))
+
+    def _remove_shot_visual(self):
+        shot = self.storyboard_panel.current_shot()
+        item = self.storyboard_panel.visual_references.currentItem()
+        if not self.session or not shot or not item or item.data(Qt.UserRole + 1) != 'entity': return
+        try:
+            VisualLibrary(self.session.root).relate_shot(item.data(Qt.UserRole), shot.identifier, present=False)
+            self._refresh_shot_visuals(); self.visual_library_panel.refresh()
+        except (ValueError, ProjectDatabaseError) as exc: self._show_error('Visual reference', str(exc))
+
+    def _pin_shot_reference(self):
+        shot = self.storyboard_panel.current_shot()
+        if not self.session or not shot: return
+        library = VisualLibrary(self.session.root)
+        options = []
+        for entity in library.entities_for_shot(shot.identifier):
+            for ref in library.references(entity.identifier):
+                if ref.status == 'Approved' and (asset := library.asset(ref.asset_id)):
+                    options.append((f'{entity.name} · {ref.role} · {asset.path}', asset.identifier))
+        if not options:
+            self.statusBar().showMessage('Associate an entity with an approved image first', 5000)
+            return
+        label, ok = QInputDialog.getItem(self, 'Pin Approved Image', 'Reference:',
+                                          [option[0] for option in options], editable=False)
+        if not ok: return
+        try:
+            library.relate_shot_asset(shot.identifier, next(asset_id for title, asset_id in options if title == label))
+            self._refresh_shot_visuals()
+        except (ValueError, ProjectDatabaseError) as exc: self._show_error('Visual reference', str(exc))
+
+    def _unpin_shot_reference(self):
+        shot = self.storyboard_panel.current_shot()
+        item = self.storyboard_panel.visual_references.currentItem()
+        if not self.session or not shot or not item or item.data(Qt.UserRole + 1) != 'asset': return
+        try:
+            VisualLibrary(self.session.root).relate_shot_asset(shot.identifier, item.data(Qt.UserRole), False)
+            self._refresh_shot_visuals()
+        except (ValueError, ProjectDatabaseError) as exc: self._show_error('Visual reference', str(exc))
+
+    def _visuals_changed(self):
+        self._refresh_shot_visuals()
+
+    def _visual_style_override(self, scope, style):
+        if not self.session: return
+        target = self.scenes_panel.current_scene() if scope == 'scene' else self.storyboard_panel.current_shot()
+        if not target:
+            self._show_error('Visual style', f'Select a {scope} first')
+            return
+        try:
+            VisualLibrary(self.session.root).save_style_override(scope, target.identifier, style)
+            self.statusBar().showMessage(f'Visual style override saved for {scope}', 5000)
+        except (ValueError, ProjectDatabaseError) as exc: self._show_error('Visual style', str(exc))
+
+    def _extract_entities(self, scope: str):
+        if not self.session or self._entity_task: return
+        try:
+            self._require_current_scenes()
+            if scope == 'all':
+                scenes = self.scenes_panel.scenes
+            elif scope == 'multiple':
+                dialog = QDialog(self); dialog.setWindowTitle('Select Scenes for Entity Extraction')
+                choices = QListWidget(dialog); choices.setSelectionMode(QListWidget.MultiSelection)
+                for scene in self.scenes_panel.scenes: choices.addItem(f'{scene.sequence}. {scene.title}')
+                buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+                buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject)
+                layout = QVBoxLayout(dialog); layout.addWidget(choices); layout.addWidget(buttons)
+                if dialog.exec() != QDialog.Accepted: return
+                scenes = [self.scenes_panel.scenes[choices.row(item)] for item in choices.selectedItems()]
+            else:
+                scenes = [self.scenes_panel.current_scene()]
+            scenes = [s for s in scenes if s]
+            if not scenes: raise ValueError('Select a narrative scene')
+            settings = load_ai_settings()
+            provider = make_provider(settings)
+            task = EntityTask(scenes, VisualLibrary(self.session.root), provider, source_hash(self._source_text),
+                              self.session.project.resolved_prose(self.session.root), settings.chunk_chars, self)
+            self._entity_task = task
+            task.progress.connect(self.visual_library_panel.status.setText)
+            task.succeeded.connect(self._entities_ready)
+            task.failed.connect(lambda message: self._show_error('Entity extraction', message))
+            task.finished.connect(self._entity_finished)
+            task.finished.connect(task.deleteLater)
+            self._refresh(); task.start()
+        except (ValueError, ProjectDatabaseError, OSError) as exc:
+            self._show_error('Entity extraction', str(exc))
+
+    def _cancel_entity_extraction(self):
+        if self._entity_task:
+            self._entity_task.cancel_event.set()
+            self.visual_library_panel.status.setText('Canceling after the current AI request…')
+
+    def _entities_ready(self, created):
+        if not self.session: return
+        self.visual_library_panel.refresh()
+        self.visual_library_panel.status.setText(f'Extracted entities; {len(created)} new suggestion(s)')
+
+    def _entity_finished(self):
+        self._entity_task = None
+        self._refresh()
 
     def _prose_selection_changed(self) -> None:
         # User selections map through source offsets; programmed highlight scrolling has no selection.
@@ -1114,6 +1345,10 @@ class MainWindow(QMainWindow):
                 reconciled.append(board)
             self.session.database.save_storyboards(reconciled, self._source_text, replace=True,
                 audio_duration=self._alignment.audio_duration if self._alignment else None)
+            visual_library = VisualLibrary(self.session.root)
+            for board in reconciled:
+                scene = next((s for s in self.scenes_panel.scenes if s.identifier == board.scene_id), None)
+                if scene: reconcile_shot_links(scene, visual_library)
             self._load_selected_storyboard()
             self.statusBar().showMessage(f"Planned {sum(len(b.shots) for b in boards)} shots across {len(boards)} scenes", 8000)
         except (ValueError, ProjectDatabaseError, PlanningCanceled, OSError) as exc:
@@ -1244,7 +1479,153 @@ class MainWindow(QMainWindow):
     def _playback_error(self, message: str) -> None:
         self._show_error("Audio playback error", message)
 
+    def _load_prompt(self):
+        shot = self.storyboard_panel.current_shot()
+        if not self.session or not shot:
+            self.image_prompt_panel.set_prompt(None, [], None)
+            return
+        store = PromptStore(self.session.root)
+        prompt = store.active(shot.identifier)
+        versions = store.versions(shot.identifier)
+        self.image_prompt_panel.set_prompt(prompt, versions, self.session.root)
+        if prompt:
+            scene = self.scenes_panel.current_scene()
+            board = self.storyboard_panel.board
+            if scene and board:
+                state = store.state(prompt, scene, shot, board, self.session.project,
+                                    VisualLibrary(self.session.root))
+                self.image_prompt_panel.status.setText(f'v{prompt.version} · {state}')
+
+    def _prompt_settings(self):
+        if not self.session: return
+        store = PromptStore(self.session.root)
+        dialog = PromptSettingsDialog(store.settings(), self)
+        if dialog.exec() == QDialog.Accepted:
+            store.save_settings(dialog.values())
+            self._load_prompt()
+
+    def _generate_prompts(self, scope):
+        if not self.session or self._prompt_task: return
+        try:
+            self._require_current_scenes()
+            scene = self.scenes_panel.current_scene()
+            if not scene: raise ValueError('Select a scene and storyboard shot')
+            selected = self.storyboard_panel.current_shot()
+            scenes = self.scenes_panel.scenes if scope == 'all' else [scene]
+            boards = {s.identifier: self.session.database.load_storyboard(s.identifier) for s in scenes}
+            if scope in {'shot', 'regenerate'} and selected is None:
+                raise ValueError('Select a storyboard shot')
+            shots = ([selected] if scope in {'shot','regenerate'} and selected else
+                     [shot for s in scenes if boards[s.identifier] for shot in boards[s.identifier].shots])
+            if not shots: raise ValueError('No storyboard shots selected')
+            regenerate = scope == 'regenerate'
+            if regenerate and PromptStore(self.session.root).approved(shots[0].identifier):
+                answer = QMessageBox.question(self, 'Generate another version?',
+                    'The approved prompt will remain active. Generate a new version for review?',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if answer != QMessageBox.Yes: return
+            ai = load_ai_settings()
+            settings = PromptStore(self.session.root).settings()
+            if settings.model: ai = replace(ai, model=settings.model)
+            provider = make_provider(ai)
+            path = self.session.project.resolved_prose(self.session.root)
+            task = PromptTask(shots, {s.identifier:s for s in scenes}, boards, self.session.root,
+                self.session.project, settings, provider, path, regenerate, self)
+            self._prompt_task = task
+            task.progress.connect(lambda n,total: self.image_prompt_panel.status.setText(f'Generating prompts {n}/{total}'))
+            task.succeeded.connect(lambda result: self._prompt_done(f'{len(result)} prompt(s) generated'))
+            task.failed.connect(self._prompt_done)
+            task.finished.connect(self._prompt_finished)
+            task.finished.connect(task.deleteLater)
+            self._refresh(); task.start()
+        except (ValueError, ProjectDatabaseError) as exc:
+            self._show_error('Image prompts', str(exc))
+
+    def _cancel_prompts(self):
+        if self._prompt_task:
+            self._prompt_task.cancel_event.set()
+            self.image_prompt_panel.status.setText('Canceling after the current request…')
+
+    def _prompt_done(self, message):
+        if isinstance(message, str) and message.startswith('Prompt generation stopped'):
+            self._show_error('Image prompts', message)
+        else:
+            self.statusBar().showMessage(str(message), 6000)
+        self._load_prompt()
+
+    def _prompt_finished(self):
+        self._prompt_task = None
+        self._refresh()
+
+    def _save_prompt(self):
+        if not self.session: return
+        try:
+            shot = self.storyboard_panel.current_shot()
+            positive, negative, components = self.image_prompt_panel.changes()
+            PromptStore(self.session.root).edit(shot.identifier, positive_prompt=positive,
+                negative_prompt=negative, components=components,
+                notes=components.generation_notes)
+            self._load_prompt()
+        except (ValueError, ProjectDatabaseError) as exc:
+            self._show_error('Save prompt', str(exc))
+
+    def _approve_prompt(self):
+        if not self.session: return
+        try:
+            shot = self.storyboard_panel.current_shot()
+            scene = self.scenes_panel.current_scene()
+            prompt = self.image_prompt_panel.prompt
+            PromptStore(self.session.root).approve(shot.identifier, prompt.version, scene, shot,
+                self.storyboard_panel.board, self.session.project, VisualLibrary(self.session.root))
+            self._load_prompt()
+        except (ValueError, ProjectDatabaseError) as exc:
+            self._show_error('Approve prompt', str(exc))
+
+    def _restore_prompt(self, version):
+        if not self.session: return
+        try:
+            shot = self.storyboard_panel.current_shot()
+            PromptStore(self.session.root).restore(shot.identifier, version)
+            self._load_prompt()
+        except (ValueError, ProjectDatabaseError) as exc:
+            self._show_error('Restore prompt', str(exc))
+
+    def _export_prompts(self):
+        if not self.session: return
+        scope, accepted = QInputDialog.getItem(self, 'Export prompts', 'Scope',
+            ['Selected prompt', 'Selected scene', 'All scenes'], 0, False)
+        if not accepted: return
+        path, _ = QFileDialog.getSaveFileName(self, 'Export image prompts',
+            str(self.session.root / 'storyboard' / 'image_prompts.json'),
+            'JSON (*.json);;Markdown (*.md)')
+        if not path: return
+        try:
+            scenes = self.scenes_panel.scenes if scope == 'All scenes' else [self.scenes_panel.current_scene()]
+            boards = {s.identifier:self.session.database.load_storyboard(s.identifier) for s in scenes if s}
+            shots = {self.storyboard_panel.current_shot().identifier} if scope == 'Selected prompt' else None
+            store = PromptStore(self.session.root)
+            content = (export_prompt_markdown if path.lower().endswith('.md') else export_prompt_json)(
+                scenes, boards, store, shot_ids=shots, project=self.session.project,
+                library=VisualLibrary(self.session.root))
+            Path(path).write_text(content, encoding='utf-8')
+            self.statusBar().showMessage(f'Prompts exported to {path}', 8000)
+        except (OSError, ValueError, ProjectDatabaseError) as exc:
+            self._show_error('Export prompts', str(exc))
+
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._prompt_task is not None:
+            self._cancel_prompts()
+            event.ignore()
+            return
+        if self._entity_task is not None:
+            self._cancel_entity_extraction()
+            event.ignore()
+            self.statusBar().showMessage('Canceling entity extraction; close when it finishes', 5000)
+            return
+        if self.visual_library_panel._image_task is not None or self.visual_library_panel._integrity_task is not None:
+            event.ignore()
+            self.statusBar().showMessage('Finishing reference image operation; close when it finishes', 5000)
+            return
         if self._storyboard_task is not None:
             self._cancel_storyboard()
             event.ignore()

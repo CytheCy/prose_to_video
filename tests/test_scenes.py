@@ -152,7 +152,7 @@ def test_migration_reopen_edits_and_source_hash(tmp_path: Path) -> None:
         connection.execute("PRAGMA user_version = 1")
     assert open_project(session.root).project.identifier == session.project.identifier
     with sqlite3.connect(db.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
     db.replace_scenes(TEXT, scenes_for())
     digest, loaded = ProjectDatabase(db.path).load_scenes()
     assert digest == source_hash(TEXT)

@@ -16,7 +16,7 @@ from prose_to_video.models.shot import Storyboard, StoryboardSettings
 from prose_to_video.pipeline.shot_planning import scene_definition_hash
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 MIGRATIONS = {
     1: """
         CREATE TABLE project (
@@ -90,6 +90,66 @@ MIGRATIONS = {
         CREATE INDEX IF NOT EXISTS shot_audio_range ON shot(scene_id, audio_start, audio_end);
         CREATE INDEX IF NOT EXISTS shot_source_range ON shot(scene_id, source_start, source_end);
     """,
+    5: """
+        CREATE TABLE IF NOT EXISTS visual_entity (identifier TEXT PRIMARY KEY, name TEXT NOT NULL,
+            entity_type TEXT NOT NULL, status TEXT NOT NULL, recurring INTEGER NOT NULL,
+            data_json TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS visual_entity_type ON visual_entity(entity_type, name);
+        CREATE TABLE IF NOT EXISTS entity_alias (entity_id TEXT NOT NULL REFERENCES visual_entity(identifier) ON DELETE CASCADE,
+            alias TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY(entity_id, alias));
+        CREATE INDEX IF NOT EXISTS entity_alias_name ON entity_alias(alias);
+        CREATE TABLE IF NOT EXISTS entity_evidence (identifier TEXT PRIMARY KEY,
+            entity_id TEXT NOT NULL REFERENCES visual_entity(identifier) ON DELETE CASCADE,
+            scene_id TEXT, data_json TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS entity_evidence_scene ON entity_evidence(scene_id);
+        CREATE TABLE IF NOT EXISTS appearance_variant (identifier TEXT PRIMARY KEY,
+            entity_id TEXT NOT NULL REFERENCES visual_entity(identifier) ON DELETE CASCADE,
+            status TEXT NOT NULL, is_default INTEGER NOT NULL, data_json TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS appearance_variant_entity ON appearance_variant(entity_id);
+        CREATE TABLE IF NOT EXISTS reference_asset (identifier TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE,
+            sha256 TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
+            format TEXT NOT NULL, imported_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS reference_asset_hash ON reference_asset(sha256);
+        CREATE TABLE IF NOT EXISTS entity_reference (entity_id TEXT NOT NULL REFERENCES visual_entity(identifier) ON DELETE CASCADE,
+            asset_id TEXT NOT NULL REFERENCES reference_asset(identifier),
+            variant_id TEXT REFERENCES appearance_variant(identifier), role TEXT NOT NULL,
+            description TEXT NOT NULL, status TEXT NOT NULL, is_primary INTEGER NOT NULL,
+            PRIMARY KEY(entity_id, asset_id));
+        CREATE INDEX IF NOT EXISTS entity_reference_asset ON entity_reference(asset_id);
+        CREATE TABLE IF NOT EXISTS entity_scene (entity_id TEXT NOT NULL REFERENCES visual_entity(identifier) ON DELETE CASCADE,
+            scene_id TEXT NOT NULL, PRIMARY KEY(entity_id, scene_id));
+        CREATE INDEX IF NOT EXISTS entity_scene_scene ON entity_scene(scene_id);
+        CREATE TABLE IF NOT EXISTS entity_shot (entity_id TEXT NOT NULL REFERENCES visual_entity(identifier) ON DELETE CASCADE,
+            shot_id TEXT NOT NULL, variant_id TEXT REFERENCES appearance_variant(identifier),
+            PRIMARY KEY(entity_id, shot_id));
+        CREATE INDEX IF NOT EXISTS entity_shot_shot ON entity_shot(shot_id);
+        CREATE TABLE IF NOT EXISTS entity_shot_exclusion (entity_id TEXT NOT NULL REFERENCES visual_entity(identifier) ON DELETE CASCADE,
+            shot_id TEXT NOT NULL, PRIMARY KEY(entity_id, shot_id));
+        CREATE TABLE IF NOT EXISTS shot_reference (shot_id TEXT NOT NULL, asset_id TEXT NOT NULL REFERENCES reference_asset(identifier),
+            PRIMARY KEY(shot_id, asset_id));
+        CREATE TABLE IF NOT EXISTS visual_style (singleton INTEGER PRIMARY KEY CHECK(singleton=1), data_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS visual_style_preset (name TEXT PRIMARY KEY, data_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS visual_style_override (scope TEXT NOT NULL, target_id TEXT NOT NULL,
+            data_json TEXT NOT NULL, PRIMARY KEY(scope, target_id));
+        CREATE TABLE IF NOT EXISTS visual_audit (identifier INTEGER PRIMARY KEY AUTOINCREMENT,
+            occurred_at TEXT NOT NULL, action TEXT NOT NULL, details_json TEXT NOT NULL);
+    """,
+    6: """
+        CREATE TABLE IF NOT EXISTS prompt_settings (singleton INTEGER PRIMARY KEY CHECK(singleton=1), data_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS image_prompt (identifier TEXT PRIMARY KEY, shot_id TEXT NOT NULL,
+            scene_id TEXT NOT NULL, version INTEGER NOT NULL, review_status TEXT NOT NULL,
+            dependency_fingerprint TEXT NOT NULL, created_at TEXT NOT NULL, data_json TEXT NOT NULL,
+            UNIQUE(shot_id, version));
+        CREATE INDEX IF NOT EXISTS image_prompt_shot_version ON image_prompt(shot_id, version DESC);
+        CREATE INDEX IF NOT EXISTS image_prompt_scene ON image_prompt(scene_id, shot_id);
+        CREATE TABLE IF NOT EXISTS prompt_active (shot_id TEXT PRIMARY KEY,
+            prompt_id TEXT NOT NULL REFERENCES image_prompt(identifier));
+        CREATE TABLE IF NOT EXISTS prompt_approved (shot_id TEXT PRIMARY KEY,
+            prompt_id TEXT NOT NULL REFERENCES image_prompt(identifier));
+        CREATE TABLE IF NOT EXISTS prompt_reference (prompt_id TEXT NOT NULL REFERENCES image_prompt(identifier) ON DELETE CASCADE,
+            asset_id TEXT NOT NULL, role TEXT NOT NULL, PRIMARY KEY(prompt_id, asset_id, role));
+        CREATE INDEX IF NOT EXISTS prompt_reference_asset ON prompt_reference(asset_id);
+    """,
 }
 
 
@@ -105,6 +165,7 @@ class ProjectDatabase:
         try:
             connection = sqlite3.connect(self.path)
             connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
             return connection
         except sqlite3.Error as exc:
             raise ProjectDatabaseError(f"Cannot open project database: {exc}") from exc

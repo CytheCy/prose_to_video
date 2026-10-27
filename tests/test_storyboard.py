@@ -134,7 +134,7 @@ def test_migration_replacement_staleness_exports(tmp_path):
     db.save_storyboard(board, TEXT)
     assert db.load_storyboard(scene.identifier).identifier == board.identifier
     with sqlite3.connect(db.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
         assert connection.execute("SELECT COUNT(*) FROM shot").fetchone()[0] == 3
     with pytest.raises(Exception):
         db.save_storyboard(board.model_copy(update={"identifier":"bad", "scene_definition_hash":"bad"}), TEXT, replace=True)
@@ -259,7 +259,7 @@ def test_version_three_migration_preserves_alignment_and_scenes(tmp_path):
     assert session.database.load_alignment().identifier == run.identifier
     assert session.database.load_scenes()[1][0].identifier == scene.identifier
     with sqlite3.connect(session.database.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
 
 def test_inter_scene_pause_visual_coverage():
     text = "Ada waits. Ben enters."
