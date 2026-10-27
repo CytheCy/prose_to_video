@@ -213,7 +213,7 @@ def test_version_five_migration_keeps_visual_data(tmp_path):
     assert store.settings().detail_level == 'Detailed'
     assert library.entity(entity.identifier).name == 'Jeff'
     with sqlite3.connect(session.database.path) as con:
-        assert con.execute('PRAGMA user_version').fetchone()[0] == 6
+        assert con.execute('PRAGMA user_version').fetchone()[0] == 7
         assert con.execute("SELECT name FROM sqlite_master WHERE name='image_prompt'").fetchone()
 
 

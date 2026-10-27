@@ -16,7 +16,7 @@ from prose_to_video.models.shot import Storyboard, StoryboardSettings
 from prose_to_video.pipeline.shot_planning import scene_definition_hash
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 MIGRATIONS = {
     1: """
         CREATE TABLE project (
@@ -149,6 +149,20 @@ MIGRATIONS = {
         CREATE TABLE IF NOT EXISTS prompt_reference (prompt_id TEXT NOT NULL REFERENCES image_prompt(identifier) ON DELETE CASCADE,
             asset_id TEXT NOT NULL, role TEXT NOT NULL, PRIMARY KEY(prompt_id, asset_id, role));
         CREATE INDEX IF NOT EXISTS prompt_reference_asset ON prompt_reference(asset_id);
+    """,
+    7: """
+        CREATE TABLE IF NOT EXISTS image_generation_settings (singleton INTEGER PRIMARY KEY CHECK(singleton=1), data_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS image_job (identifier TEXT PRIMARY KEY, project_id TEXT NOT NULL, scene_id TEXT NOT NULL,
+            shot_id TEXT NOT NULL, prompt_id TEXT NOT NULL REFERENCES image_prompt(identifier),
+            status TEXT NOT NULL, provider_job_id TEXT, submitted_at TEXT, data_json TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS image_job_shot ON image_job(shot_id, status);
+        CREATE TABLE IF NOT EXISTS generated_image (identifier TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES image_job(identifier),
+            shot_id TEXT NOT NULL, parent_id TEXT REFERENCES generated_image(identifier),
+            path TEXT NOT NULL UNIQUE, hash TEXT NOT NULL,
+            approval_status TEXT NOT NULL, data_json TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS generated_image_shot ON generated_image(shot_id);
+        CREATE TABLE IF NOT EXISTS approved_image (shot_id TEXT PRIMARY KEY,
+            asset_id TEXT NOT NULL REFERENCES generated_image(identifier), locked INTEGER NOT NULL DEFAULT 0);
     """,
 }
 

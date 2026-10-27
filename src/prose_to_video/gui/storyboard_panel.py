@@ -94,7 +94,7 @@ class StoryboardPanel(QGroupBox):
         self.export_button = QPushButton("Export…")
         self.list_widget = QListWidget()
         self.timeline = ShotTimeline()
-        self.preview = QLabel("Image preview will be added in a later stage")
+        self.preview = QLabel("No approved image")
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setMinimumHeight(60)
         self.preview.setStyleSheet("background:#30343b;color:#ddd")
@@ -190,6 +190,14 @@ class StoryboardPanel(QGroupBox):
         if not self.board or not identifier: return
         i = next((i for i,s in enumerate(self.board.shots) if s.identifier == identifier), None)
         if i is not None and self.list_widget.currentRow() != i: self.list_widget.setCurrentRow(i)
+
+    def set_image_states(self, states):
+        if not self.board: return
+        for index, shot in enumerate(self.board.shots):
+            item = self.list_widget.item(index)
+            if item:
+                base = item.text().split(' | Image:')[0]
+                item.setText(base + ' | Image: ' + states.get(shot.identifier, 'Missing'))
 
     def _selected(self, row):
         shot = self.current_shot()

@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import logging
+import json
+import hashlib
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from dataclasses import replace
 from pathlib import Path
 from threading import Event
 from typing import Callable
 
-from PySide6.QtCore import QThread, Qt, Signal
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtCore import QThread, Qt, Signal, QTimer
+from PySide6.QtGui import QAction, QCloseEvent, QPixmap
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
                                QInputDialog, QLabel, QListWidget, QMainWindow, QMessageBox, QPushButton,
                                QPlainTextEdit, QScrollArea, QSplitter, QTabWidget, QVBoxLayout, QWidget)
@@ -23,6 +26,8 @@ from prose_to_video.gui.prose_viewer import ProseViewer
 from prose_to_video.gui.scenes_panel import ScenesPanel
 from prose_to_video.gui.storyboard_panel import StoryboardPanel
 from prose_to_video.gui.image_prompt_panel import ImagePromptPanel
+from prose_to_video.gui.image_gallery_panel import ImageGalleryPanel
+from prose_to_video.gui.image_generation_settings import ImageGenerationSettingsDialog
 from prose_to_video.gui.image_prompt_settings import PromptSettingsDialog
 from prose_to_video.gui.visual_library_panel import VisualLibraryPanel
 from prose_to_video.gui.storyboard_settings import StoryboardSettingsDialog
@@ -36,6 +41,10 @@ from prose_to_video.pipeline.providers import make_provider
 from prose_to_video.pipeline.entity_extraction import extract_entities, reconcile_shot_links, ExtractionCanceled
 from prose_to_video.storage.visual_library import VisualLibrary
 from prose_to_video.storage.image_prompts import PromptStore
+from prose_to_video.storage.generated_images import ImageStore
+from prose_to_video.storage.image_export import image_manifest, manifest_markdown, export_approved_images, visual_timeline_manifest
+from prose_to_video.pipeline.image_generation import ImageGenerator, eligible_shots, make_image_provider, asset_freshness
+from prose_to_video.models.image_job import ImageGenerationSettings
 from prose_to_video.storage.image_prompt_export import export_prompt_json, export_prompt_markdown
 from prose_to_video.pipeline.image_prompt_generation import generate_batch, PromptCanceled
 from prose_to_video.pipeline.shot_planning import PlanningCanceled, plan_scene
@@ -72,6 +81,73 @@ class FileTask(QThread):
         except Exception as exc:
             LOGGER.exception("Unexpected background task failure")
             self.failed.emit(f"Operation failed: {exc}")
+
+
+class ImageTask(QThread):
+    progress = Signal(int, int, str)
+    succeeded = Signal(str)
+
+    def __init__(self, generator, prepared, parent=None):
+        super().__init__(parent)
+        self.generator=generator
+        self.prepared=prepared
+        self.cancel_event=Event()
+
+    def run(self):
+        failures=[]
+        completed=0
+        maximum=min(self.generator.store.settings().max_concurrent_jobs,len(self.prepared))
+        next_index=0
+        def process(job,request):
+            try:
+                self.generator.run(job,request,cancel=self.cancel_event)
+                if job.status in {'Submitted','Running'} and job.provider_job_id:
+                    while not self.cancel_event.is_set() and job.status in {'Submitted','Running'}:
+                        self.msleep(800)
+                        self.generator.reconcile(job)
+                if self.cancel_event.is_set() and job.status in {'Submitted','Running'}:
+                    self.generator.cancel(job)
+                return f'{job.shot_id}: {job.error or job.status}' if job.status in {'Failed','Needs Reconciliation'} else ''
+            except Exception as exc:
+                return f'{job.shot_id}: {exc}'
+        with ThreadPoolExecutor(max_workers=maximum) as pool:
+            running={}
+            while next_index<len(self.prepared) or running:
+                while not self.cancel_event.is_set() and next_index<len(self.prepared) and len(running)<maximum:
+                    job,request=self.prepared[next_index];next_index+=1
+                    self.progress.emit(completed,len(self.prepared),f'{job.shot_id}: submitting')
+                    running[pool.submit(process,job,request)]=job
+                if self.cancel_event.is_set():
+                    for job,_ in self.prepared[next_index:]:
+                        if job.status=='Pending':job.status='Canceled';self.generator.store.update_job(job)
+                    next_index=len(self.prepared)
+                if not running:break
+                done,_=wait(running,timeout=.5,return_when=FIRST_COMPLETED)
+                for future in done:
+                    job=running.pop(future);completed+=1
+                    message=future.result()
+                    if message:failures.append(message)
+                    self.progress.emit(completed,len(self.prepared),f'{job.shot_id}: {job.status}')
+        self.succeeded.emit('\n'.join(failures))
+
+
+class ImageRecoveryTask(QThread):
+    succeeded=Signal(str)
+    def __init__(self,session,jobs,parent=None):
+        super().__init__(parent);self.session=session;self.jobs=jobs;self.cancel_event=Event()
+    def run(self):
+        errors=[]
+        for job in self.jobs:
+            if self.cancel_event.is_set():break
+            try:
+                settings=ImageGenerationSettings.model_validate(job.settings)
+                generator=ImageGenerator(self.session,make_image_provider(settings,self.session.root))
+                if job.status=='Pending':generator.run(job,generator.request_for_job(job),cancel=self.cancel_event)
+                else:generator.reconcile(job)
+                if job.status in {'Failed','Needs Reconciliation'}:
+                    errors.append(f'{job.shot_id}: {job.error or job.status}')
+            except Exception as exc:errors.append(f'{job.shot_id}: {exc}')
+        self.succeeded.emit('\n'.join(errors))
 
 
 class PromptTask(QThread):
@@ -248,6 +324,7 @@ class MainWindow(QMainWindow):
         self._storyboard_task: StoryboardTask | None = None
         self._entity_task: EntityTask | None = None
         self._prompt_task: PromptTask | None = None
+        self._image_task: ImageTask | None = None
         self._alignment: AlignmentRun | None = None
         self._cached_transcript = None
         self._last_alignment_settings: TranscriptionSettings | None = None
@@ -297,7 +374,7 @@ class MainWindow(QMainWindow):
         about_action = QAction("About", self)
         about_action.triggered.connect(lambda: QMessageBox.about(
             self, "About Prose to Video",
-            "Prose to Video — Stage Five\nScenes, audio alignment, storyboards, and a Visual Library."
+            "Prose to Video — Stage Seven\nScenes, audio alignment, storyboards, visual references, prompts, and image review."
         ))
         help_menu.addAction(about_action)
 
@@ -354,12 +431,25 @@ class MainWindow(QMainWindow):
         self.scenes_panel = ScenesPanel()
         self.storyboard_panel = StoryboardPanel()
         self.image_prompt_panel = ImagePromptPanel()
+        self.image_gallery_panel = ImageGalleryPanel()
         self.visual_library_panel = VisualLibraryPanel()
         self.workspace_tabs = QTabWidget()
         self.workspace_tabs.addTab(self.scenes_panel, "Scenes")
         self.workspace_tabs.addTab(self.storyboard_panel, "Storyboard")
         self.workspace_tabs.addTab(self.visual_library_panel, "Visual Library")
         self.workspace_tabs.addTab(self.image_prompt_panel, "Image Prompts")
+        self.workspace_tabs.addTab(self.image_gallery_panel, "Image Gallery")
+        self.image_gallery_panel.generate_requested.connect(self._generate_images)
+        self.image_gallery_panel.approve_requested.connect(self._approve_image)
+        self.image_gallery_panel.reject_requested.connect(self._reject_image)
+        self.image_gallery_panel.lock_requested.connect(self._lock_image)
+        self.image_gallery_panel.refine_requested.connect(self._refine_image)
+        self.image_gallery_panel.cancel_requested.connect(self._cancel_images)
+        self.image_gallery_panel.settings_requested.connect(self._image_settings)
+        self.image_gallery_panel.export_requested.connect(self._export_images)
+        self.image_gallery_panel.details_requested.connect(self._image_details)
+        self.image_gallery_panel.compare_requested.connect(self._compare_images)
+        self.image_gallery_panel.recovery_requested.connect(self._recover_image_jobs)
         self.visual_library_panel.extract_requested.connect(self._extract_entities)
         self.visual_library_panel.cancel_requested.connect(self._cancel_entity_extraction)
         self.visual_library_panel.changed.connect(self._visuals_changed)
@@ -426,7 +516,7 @@ class MainWindow(QMainWindow):
 
     def _refresh(self) -> None:
         session = self.session
-        busy = self._task is not None or self._scene_task is not None or self._alignment_task is not None or self._storyboard_task is not None or self._entity_task is not None or self._prompt_task is not None
+        busy = self._task is not None or self._scene_task is not None or self._alignment_task is not None or self._storyboard_task is not None or self._entity_task is not None or self._prompt_task is not None or self._image_task is not None
         for action in (self.new_action, self.open_action):
             action.setEnabled(not busy)
         for action in (self.save_action, self.close_action, self.settings_action):
@@ -496,6 +586,18 @@ class MainWindow(QMainWindow):
         self._storyboard_stale = False
         self.storyboard_panel.set_board(None)
         self.image_prompt_panel.set_prompt(None, [], None)
+        self.image_gallery_panel.set_shot(None, [], None, None)
+        image_notice=''
+        if session:
+            image_store=ImageStore(session.root)
+            interrupted=image_store.recover()
+            missing=image_store.missing_assets()
+            if missing:
+                image_notice=f'{len(missing)} generated image files are missing'
+            if interrupted:
+                image_notice+=(' · ' if image_notice else '')+f'{len(interrupted)} image jobs need reconciliation'
+                QTimer.singleShot(0,lambda opened=session:
+                    self._recover_image_jobs(automatic=True) if self.session==opened else None)
         self.visual_library_panel.set_library(VisualLibrary(session.root) if session else None)
         self._cached_transcript = None
         self._highlighted_span = None
@@ -508,7 +610,7 @@ class MainWindow(QMainWindow):
         if session and session.file_status()[1]:
             self._start_waveform()
         self.statusBar().showMessage(
-            f"Project: {session.project.name}" if session else "Project closed", 5_000
+            image_notice or (f"Project: {session.project.name}" if session else "Project closed"), 15_000 if image_notice else 5_000
         )
 
     def _queue_prose_load(self) -> None:
@@ -1122,6 +1224,7 @@ class MainWindow(QMainWindow):
             self.prose_viewer.set_layer("shot", None)
         self._refresh_shot_visuals()
         self._load_prompt()
+        self._load_gallery()
 
     def _refresh_shot_visuals(self) -> None:
         widget = self.storyboard_panel.visual_references
@@ -1496,6 +1599,239 @@ class MainWindow(QMainWindow):
                                     VisualLibrary(self.session.root))
                 self.image_prompt_panel.status.setText(f'v{prompt.version} · {state}')
 
+    def _load_gallery(self):
+        shot=self.storyboard_panel.current_shot()
+        if not self.session or not shot:
+            self.image_gallery_panel.set_shot(None,[],None,None)
+            return
+        store=ImageStore(self.session.root)
+        totals=store.totals()
+        actual=f"{totals['actual_cost']:.2f}" if totals['actual_cost_count'] else 'Unavailable'
+        estimate=f"{totals['estimated_cost']:.2f}" if totals['estimated_cost_count'] else 'Unavailable'
+        self.image_gallery_panel.summary.setText(
+            f"Images: {totals['images']} · Completed jobs: {totals['completed']} · "
+            f"Failed: {totals['failed']} · Pending: {totals['pending']} · "
+            f"Recorded actual cost: {actual} · Estimated cost: {estimate}")
+        approved=store.approved(shot.identifier)
+        assets=store.assets(shot.identifier)
+        self.image_gallery_panel.set_shot(shot,assets,approved[0] if approved else None,self.session.root)
+        if approved and (self.session.root/approved[0].path).is_file():
+            pix=QPixmap(str(self.session.root/approved[0].path))
+            self.storyboard_panel.preview.setPixmap(pix.scaled(360,220,Qt.KeepAspectRatio,Qt.SmoothTransformation))
+        else:
+            self.storyboard_panel.preview.setPixmap(QPixmap())
+            self.storyboard_panel.preview.setText('Image missing' if approved else 'No approved image')
+        board=self.storyboard_panel.board
+        if board:
+            states={}
+            selections=store.approved_map()
+            jobs_by_shot={}
+            for image_job in store.jobs():jobs_by_shot.setdefault(image_job.shot_id,[]).append(image_job)
+            asset_shots={asset.shot_id for asset in store.assets()}
+            for s in board.shots:
+                selection=selections.get(s.identifier)
+                jobs=jobs_by_shot.get(s.identifier,[])
+                if selection:
+                    scene=self.scenes_panel.current_scene()
+                    freshness=asset_freshness(self.session,scene,s,board,selection[0]) if scene else 'Outdated'
+                    states[s.identifier]='Approved' if freshness=='Current' else freshness
+                elif any(j.status in {'Pending','Submitted','Running','Needs Reconciliation'} for j in jobs):states[s.identifier]='Generating'
+                elif s.identifier in asset_shots:states[s.identifier]='Awaiting review'
+                elif any(j.status=='Failed' for j in jobs):states[s.identifier]='Failed'
+                else:states[s.identifier]='Missing'
+            self.storyboard_panel.set_image_states(states)
+
+    def _image_settings(self):
+        if not self.session:return
+        store=ImageStore(self.session.root)
+        dialog=ImageGenerationSettingsDialog(store.settings(),self)
+        if dialog.exec()==QDialog.Accepted:
+            try:
+                values=dialog.values()
+                if values.provider=='ComfyUI' and values.workflow_path:
+                    source=Path(values.workflow_path)
+                    if not source.is_absolute():source=self.session.root/source
+                    data=source.read_bytes()
+                    if not isinstance(json.loads(data),dict):raise ValueError('ComfyUI API workflow must be a JSON object')
+                    directory=self.session.root/'storyboard'/'workflows';directory.mkdir(parents=True,exist_ok=True)
+                    target=directory/(hashlib.sha256(data).hexdigest()+'.json')
+                    if not target.exists():target.write_bytes(data)
+                    values.workflow_path=target.relative_to(self.session.root).as_posix()
+                store.save_settings(values)
+                self._load_gallery()
+            except (OSError,ValueError) as exc:self._show_error('Image settings',str(exc))
+
+    def _generate_images(self,scope):
+        if not self.session or self._image_task:return
+        scene=self.scenes_panel.current_scene();shot=self.storyboard_panel.current_shot()
+        if scope in {'shot','variations'} and (not scene or not shot):return
+        if scope=='scene' and not scene:return
+        settings=ImageStore(self.session.root).settings()
+        if scope=='variations':settings=settings.model_copy(update={'candidates':max(2,settings.candidates)})
+        try:
+            generator=ImageGenerator(self.session)
+            scenes=self.session.database.load_scenes()[1]
+            if scope in {'shot','variations'}:
+                board=self.storyboard_panel.board
+                targets=[(scene,shot,board)]
+                counts={'selected':1,'approved':int(bool(generator.store.approved(shot.identifier))),
+                        'missing':int(not bool(generator.store.assets(shot.identifier))),'outdated':0,'skipped':0}
+            else:
+                targets,counts=eligible_shots(self.session,scenes,
+                    scene_ids={scene.identifier} if scope=='scene' and scene else None)
+            if not targets:
+                QMessageBox.information(self,'Image generation','No eligible shots with approved, current prompts');return
+            cost=(len(targets)*settings.candidates*settings.estimated_cost_per_image
+                  if settings.estimated_cost_per_image is not None else None)
+            summary=(f"Selected shots: {counts['selected']}\nAlready approved: {counts['approved']}\n"
+                f"Missing images: {counts['missing']}\nOutdated prompts: {counts['outdated']}\n"
+                f"Skipped: {counts['skipped']}\nProvider: {settings.provider}\n"
+                f"Candidates per shot: {settings.candidates}\n"
+                f"Estimated cost: {cost:.2f}" if cost is not None else
+                f"Selected shots: {counts['selected']}\nAlready approved: {counts['approved']}\n"
+                f"Missing images: {counts['missing']}\nOutdated prompts: {counts['outdated']}\n"
+                f"Skipped: {counts['skipped']}\nProvider: {settings.provider}\n"
+                f"Candidates per shot: {settings.candidates}\nCost estimate unavailable")
+            prepared=[]
+            for target_scene,target_shot,target_board in targets:
+                try:
+                    job,request,_=generator.prepare(target_scene,target_shot,target_board,settings=settings)
+                    prepared.append((job,request))
+                except ValueError as exc:
+                    if scope in {'shot','variations'} and 'outdated' in str(exc).lower():
+                        if QMessageBox.question(self,'Outdated approved prompt',str(exc)+'\n\nGenerate with this approved version anyway?')==QMessageBox.Yes:
+                            job,request,_=generator.prepare(target_scene,target_shot,target_board,
+                                settings=settings,allow_outdated=True)
+                            prepared.append((job,request))
+                    else:raise
+            if not prepared:return
+            omitted=[f'{job.shot_id}: {", ".join(job.excluded_references)}' for job,_ in prepared if job.excluded_references]
+            if omitted:summary+='\nExcluded references (provider limit):\n'+'\n'.join(omitted)
+            transforms=sorted({t for job,_ in prepared for t in job.transformations})
+            if transforms:summary+='\nProvider translation: '+'; '.join(transforms)
+            if QMessageBox.question(self,'Submit image generation',summary+'\n\nSubmit these jobs?')!=QMessageBox.Yes:return
+            for job,_ in prepared:generator.store.save_job(job)
+            task=ImageTask(generator,prepared,self);self._image_task=task
+            task.progress.connect(lambda n,total,msg:self.image_gallery_panel.status.setText(f'{n}/{total} · {msg}'))
+            task.succeeded.connect(self._images_finished)
+            task.finished.connect(self._image_thread_finished)
+            task.start()
+            self._refresh()
+        except Exception as exc:self._show_error('Image generation',str(exc))
+
+    def _images_finished(self,failures):
+        self._load_gallery()
+        if failures:QMessageBox.warning(self,'Image generation',failures)
+
+    def _image_thread_finished(self):
+        self._image_task=None
+        self._refresh()
+        self._load_gallery()
+
+    def _cancel_images(self):
+        if self._image_task:self._image_task.cancel_event.set()
+        elif self.session:
+            store=ImageStore(self.session.root)
+            pending=store.jobs('Pending')
+            if pending and QMessageBox.question(self,'Cancel pending jobs',
+                    f'Cancel {len(pending)} jobs that have not been submitted?')==QMessageBox.Yes:
+                for job in pending:
+                    job.status='Canceled';store.update_job(job)
+                self._load_gallery()
+            elif not pending:self.image_gallery_panel.status.setText('No pending image jobs')
+
+    def _recover_image_jobs(self,automatic=False):
+        if not self.session or self._image_task:return
+        jobs=ImageStore(self.session.root).jobs()
+        if automatic:
+            jobs=[j for j in jobs if j.status in {'Needs Reconciliation','Submitted','Running'} and j.provider_job_id]
+        else:
+            pending=[j for j in jobs if j.status=='Pending']
+            uncertain=[j for j in jobs if j.status in {'Needs Reconciliation','Submitted','Running'} and j.provider_job_id]
+            unresolved=[j for j in jobs if j.status=='Needs Reconciliation' and not j.provider_job_id]
+            if unresolved:
+                QMessageBox.information(self,'Uncertain image jobs',
+                    f'{len(unresolved)} requests have no provider job ID. They will not be resubmitted automatically.')
+            if pending and QMessageBox.question(self,'Resume image jobs',
+                    f'Submit {len(pending)} pending image jobs? This may incur charges.')==QMessageBox.Yes:
+                jobs=pending+uncertain
+            else:jobs=uncertain
+        if not jobs:return
+        task=ImageRecoveryTask(self.session,jobs,self);self._image_task=task
+        task.succeeded.connect(self._images_finished);task.finished.connect(self._image_thread_finished);task.start()
+        self._refresh()
+
+    def _approve_image(self,asset_id):
+        if not self.session or not asset_id:return
+        try:ImageStore(self.session.root).approve(asset_id);self._load_gallery()
+        except Exception as exc:self._show_error('Approve image',str(exc))
+
+    def _reject_image(self,asset_id):
+        if not self.session or not asset_id:return
+        try:ImageStore(self.session.root).reject(asset_id);self._load_gallery()
+        except Exception as exc:self._show_error('Reject image',str(exc))
+
+    def _lock_image(self,locked):
+        shot=self.storyboard_panel.current_shot()
+        if not self.session or not shot:return
+        try:ImageStore(self.session.root).lock(shot.identifier,locked);self._load_gallery()
+        except Exception as exc:self._show_error('Lock image',str(exc))
+
+    def _refine_image(self,asset_id):
+        if not self.session or not asset_id:return
+        scene=self.scenes_panel.current_scene();shot=self.storyboard_panel.current_shot()
+        if not scene or not shot:return
+        instruction,ok=QInputDialog.getMultiLineText(self,'Refine image',
+            'Describe the requested change. The approved prompt remains unchanged:')
+        if not ok or not instruction.strip():return
+        try:
+            generator=ImageGenerator(self.session)
+            job,request,_=generator.prepare(scene,shot,self.storyboard_panel.board,parent_id=asset_id,
+                revision_instruction=instruction.strip())
+            if QMessageBox.question(self,'Refine image','Generate a new candidate from the selected image?')!=QMessageBox.Yes:return
+            generator.store.save_job(job)
+            task=ImageTask(generator,[(job,request)],self);self._image_task=task
+            task.progress.connect(lambda n,total,msg:self.image_gallery_panel.status.setText(msg))
+            task.succeeded.connect(self._images_finished);task.finished.connect(self._image_thread_finished);task.start()
+            self._refresh()
+        except Exception as exc:self._show_error('Refine image',str(exc))
+
+    def _image_details(self,asset_id):
+        if not self.session or not asset_id:return
+        store=ImageStore(self.session.root);asset=store.asset(asset_id)
+        if asset:
+            job=store.job(asset.job_id)
+            QMessageBox.information(self,'Generation details',json.dumps(job.model_dump(mode='json'),indent=2))
+
+    def _compare_images(self):
+        if not self.session:return
+        assets=self.image_gallery_panel.assets[:4]
+        if len(assets)<2:return
+        dialog=QDialog(self);dialog.setWindowTitle('Compare Candidates')
+        layout=QHBoxLayout(dialog)
+        for asset in assets:
+            label=QLabel();label.setPixmap(QPixmap(str(self.session.root/asset.thumbnail_path)).scaled(300,240,Qt.KeepAspectRatio))
+            layout.addWidget(label)
+        dialog.exec()
+
+    def _export_images(self):
+        if not self.session:return
+        choice,ok=QInputDialog.getItem(self,'Export images','Format',
+            ['Approved images and manifest','Generation JSON','Generation Markdown','Visual timeline JSON'],0,False)
+        if not ok:return
+        try:
+            scenes=self.session.database.load_scenes()[1]
+            if choice=='Approved images and manifest':
+                folder=QFileDialog.getExistingDirectory(self,'Export approved images')
+                if folder:export_approved_images(self.session,scenes,folder)
+            else:
+                suffix='.md' if choice=='Generation Markdown' else '.json'
+                path,_=QFileDialog.getSaveFileName(self,'Export image manifest',str(self.session.root/'images'/('manifest'+suffix)))
+                if path:
+                    rows=visual_timeline_manifest(self.session,scenes) if choice=='Visual timeline JSON' else image_manifest(self.session,scenes)
+                    Path(path).write_text(manifest_markdown(rows) if suffix=='.md' else json.dumps(rows,indent=2),encoding='utf-8')
+        except Exception as exc:self._show_error('Export images',str(exc))
+
     def _prompt_settings(self):
         if not self.session: return
         store = PromptStore(self.session.root)
@@ -1613,6 +1949,11 @@ class MainWindow(QMainWindow):
             self._show_error('Export prompts', str(exc))
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._image_task is not None:
+            self._cancel_images()
+            event.ignore()
+            self.statusBar().showMessage('Finishing current image request; close when it finishes',5000)
+            return
         if self._prompt_task is not None:
             self._cancel_prompts()
             event.ignore()
