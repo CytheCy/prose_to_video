@@ -1,3 +1,4 @@
+from prose_to_video.storage.database import SCHEMA_VERSION
 """Stage Seven deterministic image generation and storage tests."""
 import json
 import os
@@ -220,7 +221,7 @@ def test_version_seven_migration_keeps_prompt(tmp_path):
     db=ProjectDatabase(database)
     with db._connect() as con:
         db._check_schema(con)
-        assert con.execute('PRAGMA user_version').fetchone()[0]==7
+        assert con.execute('PRAGMA user_version').fetchone()[0]==SCHEMA_VERSION
         assert con.execute('SELECT identifier FROM image_prompt').fetchone()[0]=='prompt'
         assert con.execute('SELECT count(*) FROM generated_image').fetchone()[0]==0
 

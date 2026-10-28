@@ -8,7 +8,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SHOT_TYPES = ("Establishing", "Extreme wide", "Wide", "Medium", "Close-up", "Extreme close-up", "Over-the-shoulder", "Point-of-view", "Insert", "Environmental detail")
-CAMERA_MOVEMENTS = ("Static", "Slow pan left", "Slow pan right", "Tilt up", "Tilt down", "Push in", "Pull back", "Tracking", "Slow lateral", "Aerial")
+CAMERA_MOVEMENTS = ("Static", "Slow pan left", "Slow pan right", "Pan up", "Pan down", "Tilt up", "Tilt down", "Push in", "Pull back", "Diagonal pan", "Combined pan and zoom", "Custom", "Tracking", "Slow lateral", "Aerial")
 STATUSES = ("Not reviewed", "Reviewed", "Manually edited")
 TIMING_STATUSES = ("fully timed", "partially timed", "untimed")
 

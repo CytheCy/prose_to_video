@@ -16,7 +16,7 @@ from prose_to_video.models.shot import Storyboard, StoryboardSettings
 from prose_to_video.pipeline.shot_planning import scene_definition_hash
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 9
 MIGRATIONS = {
     1: """
         CREATE TABLE project (
@@ -164,6 +164,43 @@ MIGRATIONS = {
         CREATE TABLE IF NOT EXISTS approved_image (shot_id TEXT PRIMARY KEY,
             asset_id TEXT NOT NULL REFERENCES generated_image(identifier), locked INTEGER NOT NULL DEFAULT 0);
     """,
+    8: """
+        CREATE TABLE IF NOT EXISTS video_render_settings (singleton INTEGER PRIMARY KEY CHECK(singleton=1), data_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS video_render_job (identifier TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+            scope TEXT NOT NULL, mode TEXT NOT NULL, status TEXT NOT NULL, output_path TEXT NOT NULL,
+            started_at TEXT NOT NULL, completed_at TEXT, plan_fingerprint TEXT NOT NULL, data_json TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS video_render_job_history ON video_render_job(started_at DESC);
+        CREATE TABLE IF NOT EXISTS render_shot_override (shot_id TEXT PRIMARY KEY, data_json TEXT NOT NULL);
+    """,
+    9: """
+        CREATE TABLE IF NOT EXISTS shot_production (shot_id TEXT PRIMARY KEY, mode TEXT NOT NULL,
+            coverage_json TEXT NOT NULL, draft_fallback INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS motion_prompt (identifier TEXT PRIMARY KEY, shot_id TEXT NOT NULL,
+            scene_id TEXT NOT NULL, version INTEGER NOT NULL, status TEXT NOT NULL,
+            data_json TEXT NOT NULL, UNIQUE(shot_id,version));
+        CREATE INDEX IF NOT EXISTS motion_prompt_shot ON motion_prompt(shot_id,version DESC);
+        CREATE TABLE IF NOT EXISTS approved_motion_prompt (shot_id TEXT PRIMARY KEY,
+            prompt_id TEXT NOT NULL REFERENCES motion_prompt(identifier));
+        CREATE TABLE IF NOT EXISTS video_generation_settings (singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            data_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS video_job (identifier TEXT PRIMARY KEY, shot_id TEXT NOT NULL,
+            prompt_id TEXT NOT NULL REFERENCES motion_prompt(identifier), status TEXT NOT NULL,
+            provider_job_id TEXT, data_json TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS video_job_shot ON video_job(shot_id,status);
+        CREATE TABLE IF NOT EXISTS generated_video (identifier TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES video_job(identifier), shot_id TEXT NOT NULL,
+            parent_id TEXT REFERENCES generated_video(identifier), path TEXT NOT NULL UNIQUE,
+            sha256 TEXT NOT NULL, status TEXT NOT NULL, data_json TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS generated_video_shot ON generated_video(shot_id);
+        CREATE TABLE IF NOT EXISTS approved_video (shot_id TEXT PRIMARY KEY, clip_ids_json TEXT NOT NULL,
+            locked INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS approved_video_clip (shot_id TEXT NOT NULL REFERENCES approved_video(shot_id) ON DELETE CASCADE,
+            sequence INTEGER NOT NULL, clip_id TEXT NOT NULL REFERENCES generated_video(identifier),
+            PRIMARY KEY(shot_id,sequence), UNIQUE(shot_id,clip_id));
+        CREATE TABLE IF NOT EXISTS video_approval_history (identifier INTEGER PRIMARY KEY AUTOINCREMENT,
+            shot_id TEXT NOT NULL, clip_ids_json TEXT NOT NULL, approved_at TEXT NOT NULL);
+    """,
+
 }
 
 

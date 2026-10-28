@@ -1,4 +1,5 @@
 from __future__ import annotations
+from prose_to_video.storage.database import SCHEMA_VERSION
 
 import json
 import re
@@ -152,7 +153,7 @@ def test_migration_reopen_edits_and_source_hash(tmp_path: Path) -> None:
         connection.execute("PRAGMA user_version = 1")
     assert open_project(session.root).project.identifier == session.project.identifier
     with sqlite3.connect(db.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     db.replace_scenes(TEXT, scenes_for())
     digest, loaded = ProjectDatabase(db.path).load_scenes()
     assert digest == source_hash(TEXT)

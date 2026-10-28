@@ -1,5 +1,6 @@
 """Stage Five integration tests. AI calls are deterministic local fakes."""
 from __future__ import annotations
+from prose_to_video.storage.database import SCHEMA_VERSION
 import json
 import os
 import shutil
@@ -52,7 +53,7 @@ def test_model_validation_and_migration(tmp_path):
     with pytest.raises(ValueError): ReferenceAsset(path='../wrong.png', sha256='a', width=1, height=1, format='PNG')
     session, library, *_ = setup(tmp_path)
     with sqlite3.connect(session.database.path) as con:
-        assert con.execute('PRAGMA user_version').fetchone()[0] == 7
+        assert con.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
         assert con.execute("SELECT name FROM sqlite_master WHERE name='visual_entity'").fetchone()
     assert open_project(session.root).project.identifier == session.project.identifier
     assert library.style() == VisualStyle()
@@ -299,7 +300,7 @@ def test_real_version_four_migration(tmp_path):
     digest, scenes = db.load_scenes()
     assert digest is None and scenes == []
     with sqlite3.connect(db_path) as con:
-        assert con.execute('PRAGMA user_version').fetchone()[0] == 7
+        assert con.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
         assert con.execute("SELECT name FROM sqlite_master WHERE name='visual_entity'").fetchone()
         assert con.execute("SELECT name FROM sqlite_master WHERE name='shot'").fetchone()
 

@@ -11,10 +11,10 @@ from pathlib import Path
 from threading import Event
 from typing import Callable
 
-from PySide6.QtCore import QThread, Qt, Signal, QTimer
+from PySide6.QtCore import QThread, Qt, Signal, QTimer, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QPixmap
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
-                               QInputDialog, QLabel, QListWidget, QMainWindow, QMessageBox, QPushButton,
+                               QInputDialog, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
                                QPlainTextEdit, QScrollArea, QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
 from prose_to_video.gui.audio_player import AudioPlayer
@@ -31,6 +31,14 @@ from prose_to_video.gui.image_generation_settings import ImageGenerationSettings
 from prose_to_video.gui.image_prompt_settings import PromptSettingsDialog
 from prose_to_video.gui.visual_library_panel import VisualLibraryPanel
 from prose_to_video.gui.storyboard_settings import StoryboardSettingsDialog
+from prose_to_video.gui.video_production import VideoProductionPanel, RenderSettingsDialog, RenderTask
+from prose_to_video.gui.animation_panel import AnimationPanel
+from prose_to_video.storage.generated_videos import VideoStore
+from prose_to_video.pipeline.video_generation import animation_status
+from prose_to_video.models.video_render import RenderSettings
+from prose_to_video.pipeline.video_assembly import build_render_plan
+from prose_to_video.storage.video_renders import VideoRenderStore, output_path
+from prose_to_video.rendering.ffmpeg_renderer import FFmpegRenderer
 from prose_to_video.models.scene import Scene, source_hash
 from prose_to_video.models.alignment import AlignmentRun
 from prose_to_video.models.shot import Storyboard
@@ -325,6 +333,7 @@ class MainWindow(QMainWindow):
         self._entity_task: EntityTask | None = None
         self._prompt_task: PromptTask | None = None
         self._image_task: ImageTask | None = None
+        self._render_task: RenderTask | None = None
         self._alignment: AlignmentRun | None = None
         self._cached_transcript = None
         self._last_alignment_settings: TranscriptionSettings | None = None
@@ -374,7 +383,7 @@ class MainWindow(QMainWindow):
         about_action = QAction("About", self)
         about_action.triggered.connect(lambda: QMessageBox.about(
             self, "About Prose to Video",
-            "Prose to Video — Stage Seven\nScenes, audio alignment, storyboards, visual references, prompts, and image review."
+            "Prose to Video — Stage Eight\nNarrated video assembly, camera motion, and MP4 rendering."
         ))
         help_menu.addAction(about_action)
 
@@ -433,12 +442,27 @@ class MainWindow(QMainWindow):
         self.image_prompt_panel = ImagePromptPanel()
         self.image_gallery_panel = ImageGalleryPanel()
         self.visual_library_panel = VisualLibraryPanel()
+        self.video_production_panel = VideoProductionPanel()
+        self.animation_panel = AnimationPanel()
+        self.animation_panel.status_changed.connect(self._refresh_animation_states)
         self.workspace_tabs = QTabWidget()
         self.workspace_tabs.addTab(self.scenes_panel, "Scenes")
         self.workspace_tabs.addTab(self.storyboard_panel, "Storyboard")
         self.workspace_tabs.addTab(self.visual_library_panel, "Visual Library")
         self.workspace_tabs.addTab(self.image_prompt_panel, "Image Prompts")
         self.workspace_tabs.addTab(self.image_gallery_panel, "Image Gallery")
+        self.workspace_tabs.addTab(self.animation_panel, "AI Animation")
+        self.workspace_tabs.addTab(self.video_production_panel, "Video Production")
+        self.video_production_panel.validate_requested.connect(self._validate_video)
+        self.video_production_panel.settings_requested.connect(self._render_settings)
+        self.video_production_panel.render_requested.connect(self._render_video)
+        self.video_production_panel.cancel_requested.connect(self._cancel_render)
+        self.video_production_panel.open_folder_requested.connect(self._open_render_folder)
+        self.video_production_panel.history_requested.connect(self._refresh_render_history)
+        self.video_production_panel.clear_cache_requested.connect(self._clear_render_cache)
+        self.video_production_panel.shot_override_requested.connect(self._save_shot_render_override)
+        self.video_production_panel.shot_mode_requested.connect(self._save_shot_production_mode)
+        self.video_production_panel.shot_coverage_requested.connect(self._save_shot_coverage)
         self.image_gallery_panel.generate_requested.connect(self._generate_images)
         self.image_gallery_panel.approve_requested.connect(self._approve_image)
         self.image_gallery_panel.reject_requested.connect(self._reject_image)
@@ -516,7 +540,7 @@ class MainWindow(QMainWindow):
 
     def _refresh(self) -> None:
         session = self.session
-        busy = self._task is not None or self._scene_task is not None or self._alignment_task is not None or self._storyboard_task is not None or self._entity_task is not None or self._prompt_task is not None or self._image_task is not None
+        busy = self._task is not None or self._scene_task is not None or self._alignment_task is not None or self._storyboard_task is not None or self._entity_task is not None or self._prompt_task is not None or self._image_task is not None or self._render_task is not None
         for action in (self.new_action, self.open_action):
             action.setEnabled(not busy)
         for action in (self.save_action, self.close_action, self.settings_action):
@@ -576,6 +600,20 @@ class MainWindow(QMainWindow):
 
     def _set_session(self, session: ProjectSession | None, load_prose: bool = True) -> None:
         self.session = session
+        self.video_production_panel.player.stop()
+        self.video_production_panel.player.setSource(QUrl())
+        self.video_production_panel.summary.setText('Open a project to inspect video readiness.' if not session else f'{session.project.name} · Video Production')
+        self.video_production_panel.status.setText('Not validated')
+        self.video_production_panel.set_shot_override(None, None)
+        self.video_production_panel.shot_statuses.clear()
+        self.animation_panel.bind(session,None,None)
+        if session:
+            VideoRenderStore(session.root).recover()
+            video_interrupted=VideoStore(session.root).recover()
+            if any(job.provider_job_id for job in video_interrupted):
+                QTimer.singleShot(0,lambda opened=session:
+                    self.animation_panel.reconcile_jobs(automatic=True) if self.session==opened else None)
+            self._refresh_render_history()
         self._display_stats = None
         self._source_text = ""
         self._prose_ready = False
@@ -1218,6 +1256,14 @@ class MainWindow(QMainWindow):
 
     def _shot_selected(self, identifier: str) -> None:
         shot = self.storyboard_panel.current_shot()
+        self.video_production_panel.set_shot_override(shot,
+            VideoRenderStore(self.session.root).shot_override(shot.identifier) if self.session and shot else None)
+        self.video_production_panel.set_production_mode(VideoStore(self.session.root).production(shot.identifier)[0] if self.session and shot else 'Camera Motion')
+        if self.session and shot:
+            _,coverage,fallback=VideoStore(self.session.root).production(shot.identifier)
+            self.video_production_panel.set_coverage(coverage,fallback)
+        self.video_production_panel.animation_state.setText(animation_status(self.session,shot) if self.session and shot else 'Production mode: —')
+        self.animation_panel.bind(self.session,self.scenes_panel.current_scene(),shot)
         if shot and self._prose_ready and self._source_unchanged():
             self.prose_viewer.set_layer("shot", (shot.source_start, shot.source_end), scroll=True)
         else:
@@ -1640,6 +1686,7 @@ class MainWindow(QMainWindow):
                 elif any(j.status=='Failed' for j in jobs):states[s.identifier]='Failed'
                 else:states[s.identifier]='Missing'
             self.storyboard_panel.set_image_states(states)
+        self._refresh_animation_states()
 
     def _image_settings(self):
         if not self.session:return
@@ -1948,7 +1995,178 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError, ProjectDatabaseError) as exc:
             self._show_error('Export prompts', str(exc))
 
+    def _render_settings(self):
+        if not self.session: return
+        store = VideoRenderStore(self.session.root)
+        dialog = RenderSettingsDialog(store.settings(), self)
+        if dialog.exec() != QDialog.Accepted: return
+        try:
+            settings = dialog.value()
+            store.save_settings(settings)
+            self.video_production_panel.status.setText(f'Saved {settings.width} × {settings.height} at {settings.frame_rate} fps')
+        except ValueError as exc:
+            QMessageBox.warning(self, 'Invalid render settings', str(exc))
+
+    def _save_shot_render_override(self, override):
+        shot = self.storyboard_panel.current_shot()
+        if not self.session or not shot: return
+        try:
+            VideoRenderStore(self.session.root).save_shot_override(shot.identifier, override)
+            self.video_production_panel.status.setText(f'Saved render settings for shot {shot.sequence}. Approved image and prompt are unchanged.')
+        except Exception as exc:
+            QMessageBox.warning(self, 'Shot render settings', str(exc))
+
+    def _save_shot_production_mode(self, mode):
+        shot=self.storyboard_panel.current_shot()
+        if not self.session or not shot:return
+        try:
+            store=VideoStore(self.session.root)
+            _,coverage,fallback=store.production(shot.identifier)
+            store.set_production(shot.identifier,mode,coverage,fallback)
+            self.video_production_panel.status.setText(f'Shot {shot.sequence}: {mode}')
+            self._refresh_animation_states()
+        except Exception as exc:self._show_error('Shot production mode',str(exc))
+
+    def _save_shot_coverage(self,strategy,draft_fallback):
+        shot=self.storyboard_panel.current_shot()
+        if not self.session or not shot:return
+        try:
+            store=VideoStore(self.session.root);mode,_,_=store.production(shot.identifier)
+            selected=ImageStore(self.session.root).approved(shot.identifier)
+            if strategy in {'still_tail','camera_tail'} and not selected:
+                raise ValueError('Approve a still image for the tail strategy')
+            coverage={'strategy':strategy}
+            if strategy in {'still_tail','camera_tail'}:coverage['tail_image_id']=selected[0].identifier
+            store.set_production(shot.identifier,mode,coverage,draft_fallback)
+            self.video_production_panel.status.setText(f'Shot {shot.sequence}: {strategy} coverage saved')
+            self._refresh_animation_states()
+        except Exception as exc:self._show_error('Animation coverage',str(exc))
+
+    def _video_plan(self, scope='full', draft=False):
+        if not self.session: return None, None
+        scene = self.scenes_panel.current_scene()
+        shot = self.storyboard_panel.current_shot()
+        settings = VideoRenderStore(self.session.root).settings()
+        if draft or scope == 'full': settings = settings.model_copy(update={'mode': 'draft' if draft else 'final'})
+        return build_render_plan(self.session, settings, scope=scope,
+            scene_id=scene.identifier if scene else None,
+            shot_id=shot.identifier if shot else None)
+
+    def _validate_video(self):
+        if not self.session: return
+        try:
+            plan, report = self._video_plan()
+            scenes = self.session.database.load_scenes()[1]
+            boards = [self.session.database.load_storyboard(scene.identifier) for scene in scenes]
+            shots = [shot for board in boards if board for shot in board.shots]
+            self._refresh_animation_states()
+            rows = visual_timeline_manifest(self.session, scenes)
+            approved = sum(row['approved_image'] is not None for row in rows)
+            unresolved = sum(s.audio_start is None or s.audio_end is None for s in shots)
+            render_settings = VideoRenderStore(self.session.root).settings()
+            estimate = round((self.session.project.audio_duration or 0) * render_settings.frame_rate)
+            self.video_production_panel.summary.setText(
+                f'{self.session.project.name} · narration {self._audio_duration()} · '
+                f'{len(shots)} shots · {approved} approved images · '
+                f'{len(shots)-approved} missing images · {unresolved} unresolved times · '
+                f'{render_settings.width} × {render_settings.height} at '
+                f'{render_settings.frame_rate} fps · approximately {estimate:,} frames')
+            lines = ['Ready for final render' if report.ready else 'Final render blocked']
+            lines.extend(f'{issue.severity.upper()} · scene {issue.scene_id or "—"} shot {issue.shot_id or "—"}: {issue.message}'
+                         for issue in report.issues)
+            self.video_production_panel.status.setText('\n'.join(lines))
+        except Exception as exc:
+            self.video_production_panel.status.setText(f'Validation failed: {exc}')
+
+    def _refresh_animation_states(self):
+        listing=self.video_production_panel.shot_statuses
+        listing.clear()
+        if not self.session:return
+        for scene in self.session.database.load_scenes()[1]:
+            board=self.session.database.load_storyboard(scene.identifier)
+            if not board:continue
+            for shot in board.shots:
+                listing.addItem(f'Scene {scene.sequence} · Shot {shot.sequence}: {animation_status(self.session,shot)}')
+
+    def _render_video(self, choice):
+        if not self.session or self._render_task: return
+        scope = 'full' if choice in {'full','draft'} else choice
+        draft = choice == 'draft'
+        try:
+            plan, report = self._video_plan(scope, draft)
+            if not plan or not report.ready:
+                self.video_production_panel.status.setText('Render blocked:\n'+'\n'.join(i.message for i in report.issues))
+                return
+            warnings = [i for i in report.issues if i.severity == 'warning']
+            if warnings:
+                detail = '\n'.join(f'{i.scene_id or "—"}/{i.shot_id or "—"}: {i.message}' for i in warnings[:12])
+                if QMessageBox.question(self, 'Render with timeline warnings?',
+                    detail + '\n\nContinue rendering?',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes: return
+            settings = plan.settings
+            path = output_path(self.session.root, settings)
+            if scope != 'full': path = path.with_stem(path.stem + f'_{scope}_{plan.segments[0].shot_id[:8]}')
+            if draft: path = path.with_stem(path.stem + '_DRAFT')
+            if path.exists():
+                index = 2
+                while path.with_stem(path.stem + f'_{index}').exists(): index += 1
+                next_path = path.with_stem(path.stem + f'_{index}')
+                QMessageBox.information(self, 'Output exists', f'Existing render preserved. New output: {next_path.name}')
+                path = next_path
+            task = RenderTask(self.session, plan, path, bool(warnings), self)
+            self._render_task = task
+            self.video_production_panel.set_busy(True)
+            total = plan.segments[-1].end_frame / settings.frame_rate
+            started = __import__('time').monotonic()
+            task.progress.connect(lambda stage, seconds: self.video_production_panel.status.setText(
+                f'{stage} · {seconds:.1f}s / {total:.1f}s'
+                + (f' · {min(100, seconds/total*100):.0f}% of shot frames' if stage.startswith('Shot') else '')
+                + f' · elapsed {__import__("time").monotonic()-started:.0f}s'))
+            def done(job):
+                self._render_task = None
+                self.video_production_panel.set_busy(False)
+                self.video_production_panel.status.setText(
+                    f'{job.status}: {job.output_path}' if job.status == 'Completed' else
+                    f'{job.status}: {job.error}')
+                self._refresh_render_history()
+                if job.status == 'Completed': self.video_production_panel.open_preview(Path(job.output_path))
+                task.deleteLater();self._refresh()
+            task.finished_job.connect(done)
+            task.start()
+            self._refresh()
+        except Exception as exc:
+            QMessageBox.warning(self, 'Cannot render video', str(exc))
+
+    def _cancel_render(self):
+        if self._render_task: self._render_task.cancel_event.set()
+
+    def _refresh_render_history(self):
+        panel = self.video_production_panel
+        panel.history.clear()
+        if not self.session: return
+        for job in VideoRenderStore(self.session.root).jobs():
+            item = QListWidgetItem(f'{job.started_at:%Y-%m-%d %H:%M} · {job.scope} {job.mode} · {job.status} · {Path(job.output_path).name}')
+            item.setData(Qt.UserRole, job.output_path)
+            panel.history.addItem(item)
+
+    def _open_render_folder(self):
+        if not self.session: return
+        from PySide6.QtGui import QDesktopServices
+        path = output_path(self.session.root, VideoRenderStore(self.session.root).settings()).parent
+        path.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _clear_render_cache(self):
+        if not self.session or self._render_task: return
+        FFmpegRenderer(self.session.root).clear_cache()
+        self.video_production_panel.status.setText('Render cache cleared; source images and finished videos preserved')
+
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._render_task is not None:
+            self._cancel_render()
+            event.ignore()
+            self.statusBar().showMessage('Canceling render; close when it finishes', 5000)
+            return
         if self._image_task is not None:
             self._cancel_images()
             event.ignore()
