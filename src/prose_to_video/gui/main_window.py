@@ -33,6 +33,8 @@ from prose_to_video.gui.visual_library_panel import VisualLibraryPanel
 from prose_to_video.gui.storyboard_settings import StoryboardSettingsDialog
 from prose_to_video.gui.video_production import VideoProductionPanel, RenderSettingsDialog, RenderTask
 from prose_to_video.gui.animation_panel import AnimationPanel
+from prose_to_video.gui.production_dashboard import ProductionDashboard, QualityControlPanel
+from prose_to_video.models.production import correction_workspace
 from prose_to_video.storage.generated_videos import VideoStore
 from prose_to_video.pipeline.video_generation import animation_status
 from prose_to_video.models.video_render import RenderSettings
@@ -363,6 +365,8 @@ class MainWindow(QMainWindow):
         self.ai_settings_action.triggered.connect(self._ai_settings)
         self.storyboard_settings_action = QAction("Storyboard Settings…", self)
         self.storyboard_settings_action.triggered.connect(self._storyboard_settings)
+        self.production_action = QAction('Generate Complete Video', self)
+        self.production_action.triggered.connect(self._generate_complete_video)
         exit_action = QAction("Exit", self)
         for action, callback in (
             (self.new_action, self._new_project), (self.open_action, self._open_project),
@@ -375,6 +379,7 @@ class MainWindow(QMainWindow):
             file_menu.addAction(action)
         file_menu.addAction(self.ai_settings_action)
         file_menu.addAction(self.storyboard_settings_action)
+        file_menu.addAction(self.production_action)
         file_menu.addSeparator()
         file_menu.addAction(exit_action)
         self.menuBar().addMenu("&Edit").setEnabled(False)
@@ -444,6 +449,11 @@ class MainWindow(QMainWindow):
         self.visual_library_panel = VisualLibraryPanel()
         self.video_production_panel = VideoProductionPanel()
         self.animation_panel = AnimationPanel()
+        self.production_dashboard = ProductionDashboard()
+        self.quality_control_panel = QualityControlPanel()
+        self.production_dashboard.navigate.connect(self._navigate_workspace)
+        self.production_dashboard.updated.connect(self._refresh_production_views)
+        self.quality_control_panel.navigate.connect(self._navigate_issue)
         self.animation_panel.status_changed.connect(self._refresh_animation_states)
         self.workspace_tabs = QTabWidget()
         self.workspace_tabs.addTab(self.scenes_panel, "Scenes")
@@ -453,6 +463,8 @@ class MainWindow(QMainWindow):
         self.workspace_tabs.addTab(self.image_gallery_panel, "Image Gallery")
         self.workspace_tabs.addTab(self.animation_panel, "AI Animation")
         self.workspace_tabs.addTab(self.video_production_panel, "Video Production")
+        self.workspace_tabs.addTab(self.production_dashboard, 'Production Dashboard')
+        self.workspace_tabs.addTab(self.quality_control_panel, 'Quality Control')
         self.video_production_panel.validate_requested.connect(self._validate_video)
         self.video_production_panel.settings_requested.connect(self._render_settings)
         self.video_production_panel.render_requested.connect(self._render_video)
@@ -540,7 +552,7 @@ class MainWindow(QMainWindow):
 
     def _refresh(self) -> None:
         session = self.session
-        busy = self._task is not None or self._scene_task is not None or self._alignment_task is not None or self._storyboard_task is not None or self._entity_task is not None or self._prompt_task is not None or self._image_task is not None or self._render_task is not None
+        busy = self._task is not None or self._scene_task is not None or self._alignment_task is not None or self._storyboard_task is not None or self._entity_task is not None or self._prompt_task is not None or self._image_task is not None or self._render_task is not None or bool(self.production_dashboard.worker and self.production_dashboard.worker.isRunning()) or bool(self.quality_control_panel.worker and self.quality_control_panel.worker.isRunning())
         for action in (self.new_action, self.open_action):
             action.setEnabled(not busy)
         for action in (self.save_action, self.close_action, self.settings_action):
@@ -600,6 +612,8 @@ class MainWindow(QMainWindow):
 
     def _set_session(self, session: ProjectSession | None, load_prose: bool = True) -> None:
         self.session = session
+        self.production_dashboard.bind(session)
+        self.quality_control_panel.bind(session)
         self.video_production_panel.player.stop()
         self.video_production_panel.player.setSource(QUrl())
         self.video_production_panel.summary.setText('Open a project to inspect video readiness.' if not session else f'{session.project.name} · Video Production')
@@ -2161,7 +2175,48 @@ class MainWindow(QMainWindow):
         FFmpegRenderer(self.session.root).clear_cache()
         self.video_production_panel.status.setText('Render cache cleared; source images and finished videos preserved')
 
+    def _generate_complete_video(self) -> None:
+        if not self.session:
+            self._show_error('Production', 'Open a project before generating a complete video')
+            return
+        self.workspace_tabs.setCurrentWidget(self.production_dashboard)
+        self.production_dashboard.configure()
+
+    def _navigate_workspace(self, name: str) -> None:
+        for index in range(self.workspace_tabs.count()):
+            if self.workspace_tabs.tabText(index) == name:
+                self.workspace_tabs.setCurrentIndex(index)
+                break
+
+    def _navigate_issue(self, issue) -> None:
+        if issue.scene_id:
+            self._select_scene_id(issue.scene_id)
+        if issue.shot_id:
+            self.storyboard_panel.select_id(issue.shot_id)
+        self._navigate_workspace(correction_workspace(issue))
+
+    def _refresh_production_views(self) -> None:
+        if not self.session:
+            return
+        if self._source_text:
+            self._load_scene_records(self._source_text)
+            self._load_current_alignment()
+            self._load_selected_storyboard()
+            self._load_prompt()
+            self._load_gallery()
+            self._refresh_animation_states()
+        self.quality_control_panel.refresh()
+
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self.quality_control_panel.worker and self.quality_control_panel.worker.isRunning():
+            event.ignore()
+            self.statusBar().showMessage('Finishing quality checks before closing', 5000)
+            return
+        if self.production_dashboard.worker and self.production_dashboard.worker.isRunning():
+            self.production_dashboard.pause()
+            event.ignore()
+            self.statusBar().showMessage('Pausing production after the current task; close when it stops', 5000)
+            return
         if self._render_task is not None:
             self._cancel_render()
             event.ignore()

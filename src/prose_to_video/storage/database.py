@@ -16,7 +16,7 @@ from prose_to_video.models.shot import Storyboard, StoryboardSettings
 from prose_to_video.pipeline.shot_planning import scene_definition_hash
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 MIGRATIONS = {
     1: """
         CREATE TABLE project (
@@ -199,6 +199,42 @@ MIGRATIONS = {
             PRIMARY KEY(shot_id,sequence), UNIQUE(shot_id,clip_id));
         CREATE TABLE IF NOT EXISTS video_approval_history (identifier INTEGER PRIMARY KEY AUTOINCREMENT,
             shot_id TEXT NOT NULL, clip_ids_json TEXT NOT NULL, approved_at TEXT NOT NULL);
+    """,
+    10: """
+        CREATE TABLE IF NOT EXISTS production_profile (identifier TEXT PRIMARY KEY, name TEXT NOT NULL,
+            project_id TEXT NOT NULL REFERENCES project(identifier), data_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS production_run (identifier TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES project(identifier), profile_id TEXT,
+            status TEXT NOT NULL, current_stage TEXT, started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL, data_json TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS production_run_history ON production_run(started_at DESC);
+        CREATE TABLE IF NOT EXISTS production_task (identifier TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES production_run(identifier) ON DELETE CASCADE,
+            kind TEXT NOT NULL, target_id TEXT, fingerprint TEXT NOT NULL,
+            status TEXT NOT NULL, data_json TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS production_task_run_status ON production_task(run_id,status);
+        CREATE TABLE IF NOT EXISTS production_dependency (task_id TEXT NOT NULL REFERENCES production_task(identifier) ON DELETE CASCADE,
+            depends_on TEXT NOT NULL REFERENCES production_task(identifier) ON DELETE CASCADE,
+            PRIMARY KEY(task_id,depends_on));
+        CREATE TABLE IF NOT EXISTS production_checkpoint (identifier TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES production_run(identifier) ON DELETE CASCADE,
+            task_id TEXT REFERENCES production_task(identifier), checkpoint TEXT NOT NULL,
+            origin TEXT NOT NULL, policy TEXT, decided_at TEXT NOT NULL, data_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS production_issue (identifier TEXT PRIMARY KEY,
+            run_id TEXT REFERENCES production_run(identifier),
+            project_id TEXT NOT NULL REFERENCES project(identifier), scene_id TEXT, shot_id TEXT,
+            asset_id TEXT, category TEXT NOT NULL, severity TEXT NOT NULL, status TEXT NOT NULL,
+            created_at TEXT NOT NULL, data_json TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS production_issue_filter ON production_issue(project_id,status,severity,category);
+        CREATE TABLE IF NOT EXISTS production_usage (identifier TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES production_run(identifier) ON DELETE CASCADE,
+            category TEXT NOT NULL, amount REAL, estimated INTEGER NOT NULL,
+            data_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS production_fallback (identifier TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES production_run(identifier) ON DELETE CASCADE,
+            task_id TEXT REFERENCES production_task(identifier), data_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS production_manifest (run_id TEXT PRIMARY KEY REFERENCES production_run(identifier) ON DELETE CASCADE,
+            path TEXT NOT NULL, data_json TEXT NOT NULL);
     """,
 
 }

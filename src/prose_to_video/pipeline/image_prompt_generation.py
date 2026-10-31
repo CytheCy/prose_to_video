@@ -21,7 +21,7 @@ class PromptCanceled(Exception):
     pass
 
 
-def context_for_shot(shot, scene, board, library, project, settings):
+def context_for_shot(shot, scene, board, library, project, settings, *, legacy=False):
     if shot.scene_id != scene.identifier or shot.original_prose != scene.text[shot.source_start-scene.start:shot.source_end-scene.start]:
         raise ValueError('Shot source passage is stale')
     visual = library.package_for_shot(shot.identifier)
@@ -67,7 +67,10 @@ def context_for_shot(shot, scene, board, library, project, settings):
     previous = board.shots[index-1] if settings.include_adjacent_shots and index else None
     following = board.shots[index+1] if settings.include_adjacent_shots and index+1 < len(board.shots) else None
     ratio = aspect_ratio(project.settings.width, project.settings.height)
-    payload = {'shot': shot.model_dump(mode='json'), 'source_prose': shot.original_prose,
+    image_shot = shot.model_dump(mode='json') if legacy else shot.model_dump(mode='json', exclude={
+        'camera_movement', 'suggested_motion', 'transition', 'audio_start', 'audio_end',
+        'timing_status', 'timing_note', 'review_status', 'manually_edited'})
+    payload = {'shot': image_shot, 'source_prose': shot.original_prose,
         'surrounding_prose': scene.text[max(0, shot.source_start-scene.start-400):shot.source_end-scene.start],
         'scene': {'title': scene.title, 'location': scene.location,
                   'environment': scene.environment, 'atmosphere': scene.visual_atmosphere},
@@ -81,7 +84,7 @@ def context_for_shot(shot, scene, board, library, project, settings):
         'following_shot': {'environment': following.environment} if following else None,
         'entities': [{k: v for k, v in e.items() if k != 'references'} for e in entities],
         'style': style, 'aspect_ratio': ratio, 'settings': settings.model_dump()}
-    deps = {'shot': shot.model_dump(mode='json'), 'scene': payload['scene'],
+    deps = {'shot': image_shot, 'scene': payload['scene'],
             'previous_shot': payload['previous_shot'], 'following_shot': payload['following_shot'],
             'entities': visual['entities'], 'shot_references': visual['shot_references'],
             'style': style, 'ratio': ratio, 'settings': settings.model_dump()}

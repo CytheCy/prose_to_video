@@ -44,6 +44,13 @@ def openai_reference_instruction(refs, *, has_parent=False):
     return '\n'.join(lines)
 
 
+def image_shot_inputs(shot):
+    """Render-only timing and camera movement do not change generated still content."""
+    return shot.model_dump(mode='json', exclude={
+        'camera_movement', 'suggested_motion', 'transition', 'audio_start', 'audio_end',
+        'timing_status', 'timing_note', 'review_status', 'manually_edited'})
+
+
 class ImageGenerator:
     def __init__(self, session, provider=None):
         self.session=session
@@ -101,7 +108,7 @@ class ImageGenerator:
         dependency=fingerprint({'prompt':prompt.identifier,'prompt_dependencies':prompt.dependency_fingerprint,
             'provider':settings.provider,'model':settings.model,'settings':settings.model_dump(mode='json'),
             'references':[(r.asset_id,next(p.sha256 for p in refs if p.asset_id==r.asset_id)) for r in included],
-            'shot':shot.model_dump(mode='json'),'parent':parent_id,
+            'shot':image_shot_inputs(shot),'parent':parent_id,
             'revision_instruction':revision_instruction.strip()})
         job=ImageJob(project_id=self.session.project.identifier,scene_id=scene.identifier,shot_id=shot.identifier,
             prompt_id=prompt.identifier,provider=settings.provider,model=settings.model,
@@ -270,6 +277,10 @@ def asset_freshness(session, scene, shot, board, asset):
         refs.append((asset_id,ref.sha256))
     current=fingerprint({'prompt':prompt.identifier,'prompt_dependencies':prompt.dependency_fingerprint,
         'provider':settings.provider,'model':settings.model,'settings':settings.model_dump(mode='json'),
+        'references':refs,'shot':image_shot_inputs(shot),'parent':asset.parent_id,
+        'revision_instruction':job.revision_instruction})
+    legacy=fingerprint({'prompt':prompt.identifier,'prompt_dependencies':prompt.dependency_fingerprint,
+        'provider':settings.provider,'model':settings.model,'settings':settings.model_dump(mode='json'),
         'references':refs,'shot':shot.model_dump(mode='json'),'parent':asset.parent_id,
         'revision_instruction':job.revision_instruction})
-    return 'Current' if current==asset.dependency_fingerprint else 'Outdated'
+    return 'Current' if asset.dependency_fingerprint in {current,legacy} else 'Outdated'

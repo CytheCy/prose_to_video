@@ -149,7 +149,11 @@ class PromptStore:
         try:
             payload, refs, _, missing, digest = context_for_shot(shot, scene, board, library, project, prompt.settings)
             issues.extend(message for message in missing if not message.startswith('No approved image reference'))
-            if digest != prompt.dependency_fingerprint: issues.append('Prompt dependencies changed')
+            if digest != prompt.dependency_fingerprint:
+                legacy_digest = context_for_shot(shot, scene, board, library, project,
+                                                  prompt.settings, legacy=True)[4]
+                if legacy_digest != prompt.dependency_fingerprint:
+                    issues.append('Prompt dependencies changed')
             if prompt.aspect_ratio != payload['aspect_ratio']: issues.append('Aspect ratio changed')
             if any(eid not in {e['id'] for e in payload['entities']} for eid in prompt.entity_ids):
                 issues.append('Invalid entity association')
