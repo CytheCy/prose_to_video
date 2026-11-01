@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from PySide6.QtCore import Qt, Signal, QThread, QSize
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QInputDialog,
@@ -60,8 +61,13 @@ class VisualLibraryPanel(QWidget):
         self.review_status = QComboBox(); self.review_status.addItems(REVIEW_STATUSES)
         self.recurring = QComboBox(); self.recurring.addItems(['Recurring', 'Scene-specific'])
         self.aliases = QLineEdit(); self.aliases.setPlaceholderText('Comma-separated aliases')
+        self.parent_location = QComboBox()
+        self.spatial_relationship = QLineEdit()
+        self.spatial_relationship.setPlaceholderText('e.g. on the roof, inside the factory')
         for label, widget in [('Type', self.entity_type), ('Review', self.review_status),
-                              ('Scope', self.recurring), ('Aliases', self.aliases)]: form.addRow(label, widget)
+                              ('Scope', self.recurring), ('Aliases', self.aliases),
+                              ('Parent location', self.parent_location),
+                              ('Spatial relationship', self.spatial_relationship)]: form.addRow(label, widget)
         self.scene_links = QListWidget(); self.shot_links = QListWidget()
         self.evidence = QListWidget(); self.variants = QListWidget(); self.gallery = QListWidget()
         self.gallery.setIconSize(QSize(72, 72))
@@ -199,6 +205,17 @@ class VisualLibraryPanel(QWidget):
         self.review_status.setCurrentText(entity.review_status if entity else 'Suggested')
         self.recurring.setCurrentIndex(0 if entity is None or entity.recurring else 1)
         self.aliases.setText(', '.join(entity.aliases) if entity else '')
+        self.parent_location.clear()
+        self.parent_location.addItem('None', None)
+        if self.library:
+            for candidate in self.library.entities():
+                if candidate.identifier != self.current_id and candidate.entity_type in {'Location', 'Architectural structure'}:
+                    self.parent_location.addItem(candidate.name, candidate.identifier)
+        for index in range(self.parent_location.count()):
+            if self.parent_location.itemData(index) == (entity.parent_entity_id if entity else None):
+                self.parent_location.setCurrentIndex(index)
+                break
+        self.spatial_relationship.setText(entity.spatial_relationship if entity else '')
         self._load_related()
 
     def _load_related(self):
@@ -217,7 +234,12 @@ class VisualLibraryPanel(QWidget):
             self.evidence.addItem(f'{e.kind} · {e.field}: {e.value} [{e.status}]')
             self.evidence.item(self.evidence.count()-1).setData(Qt.UserRole, e.identifier)
         for v in self.library.variants(self.current_id):
-            self.variants.addItem(f'{v.name} [{v.status}]' + (' · default' if v.is_default else ''))
+            period = f' · {v.period}' if v.period else ''
+            ages = (f' · age {v.age_min}–{v.age_max}' if v.age_min is not None and v.age_max is not None else
+                    f' · age {v.age_min}+' if v.age_min is not None else
+                    f' · age ≤{v.age_max}' if v.age_max is not None else '')
+            self.variants.addItem(f'{v.name} [{v.status}]' + period + ages +
+                                  (' · default' if v.is_default else ''))
             self.variants.item(self.variants.count()-1).setData(Qt.UserRole, v.identifier)
         for ref in self.library.references(self.current_id):
             asset = self.library.asset(ref.asset_id)
@@ -262,6 +284,8 @@ class VisualLibraryPanel(QWidget):
             entity.entity_type = self.entity_type.currentText(); entity.review_status = self.review_status.currentText()
             entity.recurring = self.recurring.currentIndex() == 0
             entity.aliases = [s.strip() for s in self.aliases.text().split(',') if s.strip()]
+            entity.parent_entity_id = self.parent_location.currentData()
+            entity.spatial_relationship = self.spatial_relationship.text().strip()
             self.library.save_entity(entity); self.refresh(entity.identifier); self.changed.emit()
         except Exception as exc: self._error(exc)
 
@@ -371,6 +395,16 @@ class VisualLibraryPanel(QWidget):
         if not variant: return
         description, ok = QInputDialog.getMultiLineText(self, 'Edit Variant', 'Description:', variant.description)
         if not ok: return
+        period, ok = QInputDialog.getText(self, 'Variant Period', 'Story period (optional):', text=variant.period)
+        if not ok: return
+        current_age = (f'{variant.age_min}-{variant.age_max}' if variant.age_min is not None and variant.age_max is not None else
+                       str(variant.age_min) if variant.age_min is not None else '')
+        age_text, ok = QInputDialog.getText(self, 'Variant Age', 'Age or age range (optional):', text=current_age)
+        if not ok: return
+        age_match = re.fullmatch(r'\s*(\d{1,3})(?:\s*-\s*(\d{1,3}))?\s*', age_text) if age_text.strip() else None
+        if age_text.strip() and not age_match:
+            QMessageBox.warning(self, 'Variant Age', 'Enter an age such as 30 or a range such as 30-40.')
+            return
         status, ok = QInputDialog.getItem(self, 'Variant Status', 'Status:', list(REVIEW_STATUSES),
                                           list(REVIEW_STATUSES).index(variant.status), editable=False)
         if not ok: return
@@ -380,6 +414,9 @@ class VisualLibraryPanel(QWidget):
         if not ok: return
         default = QMessageBox.question(self, 'Default Variant', 'Make this the default appearance?') == QMessageBox.Yes
         variant.description = description.strip(); variant.status = status; variant.is_default = default
+        variant.period = period.strip()
+        variant.age_min = int(age_match.group(1)) if age_match else None
+        variant.age_max = int(age_match.group(2)) if age_match and age_match.group(2) else variant.age_min
         variant.scene_ids = [] if context == 'All scenes' else [scenes[options.index(context)-1].identifier]
         try: self.library.update_variant(variant); self._load_related(); self.changed.emit()
         except Exception as exc: self._error(exc)

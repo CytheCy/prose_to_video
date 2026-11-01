@@ -65,6 +65,17 @@ class VisualLibrary:
 
     def save_entity(self, entity: VisualEntity):
         entity = VisualEntity.model_validate(entity.model_dump())
+        if entity.parent_entity_id:
+            seen = {entity.identifier}
+            parent_id = entity.parent_entity_id
+            while parent_id:
+                if parent_id in seen:
+                    raise ValueError('Location hierarchy contains a cycle')
+                seen.add(parent_id)
+                parent = self.entity(parent_id)
+                if parent is None:
+                    raise ValueError('Parent location does not exist')
+                parent_id = parent.parent_entity_id
         with self.transaction() as con:
             old = con.execute('SELECT data_json FROM visual_entity WHERE identifier=?', (entity.identifier,)).fetchone()
             previous = VisualEntity.model_validate_json(old[0]) if old else None

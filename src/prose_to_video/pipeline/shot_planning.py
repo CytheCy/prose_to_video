@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from prose_to_video.models.scene import Scene, source_hash
 from prose_to_video.models.alignment import AlignmentRun
-from prose_to_video.models.shot import Shot, Storyboard, StoryboardSettings
+from prose_to_video.models.shot import Shot, Storyboard, StoryboardSettings, ViewpointContext
 from prose_to_video.pipeline.text_matching import sentence_ranges
 
 class PlanningCanceled(Exception):
@@ -41,6 +41,9 @@ class ShotIdea(BaseModel):
     transition: str = "Cut"
     suggested_motion: str = "None"
     ai_notes: str = ""
+    viewpoint: ViewpointContext | None = None
+    visual_treatment: Literal["literal", "establishing", "illustrative", "montage", "screen", "symbolic"] | None = None
+    fact_provenance: dict[str, Literal["source", "approved_reference", "inferred", "proposed", "uncertain"]] = Field(default_factory=dict)
     entity_refs: list[str] = Field(default_factory=list)
 
 class ShotIdeas(BaseModel):
@@ -55,11 +58,22 @@ def scene_definition_hash(scene: Scene) -> str:
     data = {"id": scene.identifier, "start": scene.start, "end": scene.end}
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
+
+def target_range_for_scene(scene: Scene, settings: StoryboardSettings) -> tuple[float, float]:
+    low, high = settings.target_range
+    factor = (0.75 if "action" in scene.narrative_formats else
+              1.3 if "exposition" in scene.narrative_formats else
+              1.2 if "dialogue" in scene.narrative_formats else 1.0)
+    return (max(settings.minimum, min(settings.maximum, low * factor)),
+            max(settings.minimum, min(settings.maximum, high * factor)))
+
 def plan_scene(scene: Scene, manuscript: str, settings: StoryboardSettings, provider: ShotProvider,
                alignment: AlignmentRun | None = None, model_name: str = "mock",
                context: str = "", chunk_chars: int = 12000, cancel: Event | None = None) -> Storyboard:
     if scene.text != manuscript[scene.start:scene.end]:
         raise ValueError("Scene text does not match current manuscript")
+    if not scene.production_included:
+        raise ValueError("Excluded manuscript material cannot generate visual shots")
     if alignment and alignment.prose_hash != source_hash(manuscript):
         raise ValueError("Audio alignment is outdated for this prose")
     if chunk_chars < 1000:
@@ -96,9 +110,9 @@ def plan_scene(scene: Scene, manuscript: str, settings: StoryboardSettings, prov
             raise PlanningCanceled("Storyboard generation canceled")
         labeled = "\n".join(f"[ID {i}] {manuscript[anchors[i][0]:anchors[i][1]]}" for i in indices)
         payload = json.dumps({"scene": scene.model_dump(exclude={"text"}), "context": context[-1200:],
-                              "settings": settings.model_dump(), "target_seconds": settings.target_range,
+                              "settings": settings.model_dump(), "target_seconds": target_range_for_scene(scene, settings),
                               "sentences": labeled, "valid_ids": indices,
-                              "instruction": "Choose meaningful visual changes. Return one shot for the first ID only when it begins a new visual moment; include ID 0 for the first chunk. Do not force a shot at chunk edges. Preserve chronology and established appearances. Do not provide timestamps."}, ensure_ascii=False)
+                              "instruction": "Choose meaningful visual changes. Include ID 0 for the first chunk. Do not force cuts at sentence, speaker, or chunk edges. Preserve chronology and age variants. For radio, television, surveillance, drone, recorded footage and video calls, keep the observer's physical location separate from remote content. Use an explicit viewpoint; label external or illustrative views. Do not present memories as current events or proposed details as source facts. Use montage or explanatory views for exposition. Do not provide timestamps."}, ensure_ascii=False)
         try:
             response = provider.propose_shots(payload)
             response = ShotIdeas.model_validate(response)
@@ -134,7 +148,7 @@ def plan_scene(scene: Scene, manuscript: str, settings: StoryboardSettings, prov
             if pause >= settings.long_pause_threshold:
                 scene_pause_note = f"{pause:.2f}s inter-scene pause assigned to this scene's last shot"
             coverage_end = next_scene.audio_start
-    words = [w for w in alignment.words if scene.start <= w.source_start < scene.end] if alignment else []
+    words = [w for w in alignment.words if w.status != "excluded" and scene.start <= w.source_start < scene.end] if alignment else []
     boundaries: list[float | None] = [coverage_start]
     uncertain: list[bool] = []
     pause_notes: dict[int, str] = {}
@@ -176,6 +190,15 @@ def plan_scene(scene: Scene, manuscript: str, settings: StoryboardSettings, prov
                                  (settings.pause_policy == "previous" and number == len(ordered))):
             notes.append(scene_pause_note)
         data = idea.model_dump(exclude={"start_id"})
+        if not data["fact_provenance"]:
+            data["fact_provenance"] = {"visual_description": "proposed"}
+        if data["viewpoint"] is None:
+            data["viewpoint"] = ViewpointContext(category=scene.viewpoint_category,
+                observer=scene.point_of_view, physical_location=scene.location).model_dump()
+        if data["visual_treatment"] is None:
+            data["visual_treatment"] = ("montage" if "exposition" in scene.narrative_formats else
+                                        "screen" if scene.viewpoint_category in {"surveillance", "television", "video call"} else
+                                        "literal")
         def canonical(name: str) -> str:
             key = re.sub(r"[^\w]", "", name.casefold())
             for known in canonical_names:

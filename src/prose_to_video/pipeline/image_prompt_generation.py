@@ -73,6 +73,8 @@ def context_for_shot(shot, scene, board, library, project, settings, *, legacy=F
     payload = {'shot': image_shot, 'source_prose': shot.original_prose,
         'surrounding_prose': scene.text[max(0, shot.source_start-scene.start-400):shot.source_end-scene.start],
         'scene': {'title': scene.title, 'location': scene.location,
+                  'narrative_formats': scene.narrative_formats,
+                  'viewpoint_category': scene.viewpoint_category,
                   'environment': scene.environment, 'atmosphere': scene.visual_atmosphere},
         'previous_shot': {'characters': previous.characters,
                           'character_appearances': previous.character_appearances,

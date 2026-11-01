@@ -11,7 +11,7 @@ from pathlib import Path
 from threading import Event
 from typing import Callable
 
-from PySide6.QtCore import QThread, Qt, Signal, QTimer, QUrl
+from PySide6.QtCore import QSettings, QThread, Qt, Signal, QTimer, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QPixmap
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
                                QInputDialog, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
@@ -20,10 +20,12 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog, QFormLayo
 from prose_to_video.gui.audio_player import AudioPlayer
 from prose_to_video.gui.alignment_settings import AlignmentSettingsDialog
 from prose_to_video.gui.waveform import waveform_peaks
-from prose_to_video.gui.ai_settings import AISettingsDialog, load_ai_settings, save_ai_settings
+from prose_to_video.gui.ai_settings import AISettingsDialog, load_ai_settings
 from prose_to_video.gui.project_manager import NewProjectDialog, SettingsDialog
 from prose_to_video.gui.prose_viewer import ProseViewer
 from prose_to_video.gui.scenes_panel import ScenesPanel
+from prose_to_video.gui.manuscript_panel import ManuscriptPanel
+from prose_to_video.pipeline.manuscript import inclusion_fingerprint, scenes_match_inclusion
 from prose_to_video.gui.storyboard_panel import StoryboardPanel
 from prose_to_video.gui.image_prompt_panel import ImagePromptPanel
 from prose_to_video.gui.image_gallery_panel import ImageGalleryPanel
@@ -73,6 +75,7 @@ from prose_to_video.utils.prose import ProseStats, count_prose, read_prose
 
 
 LOGGER = logging.getLogger(__name__)
+MAX_RECENT_PROJECTS = 10
 
 
 class FileTask(QThread):
@@ -197,18 +200,23 @@ class SceneTask(QThread):
     failed = Signal(str)
     progress = Signal(str, int, int)
 
-    def __init__(self, path: Path, provider, settings, parent=None):
+    def __init__(self, path: Path, provider, settings, parent=None, sections=None, expected_hash=None):
         super().__init__(parent)
         self.path = path
         self.provider = provider
         self.settings = settings
+        self.sections = sections
+        self.expected_hash = expected_hash
         self.cancel_event = Event()
 
     def run(self) -> None:
         try:
             text = read_prose(self.path)
+            if self.expected_hash and source_hash(text) != self.expected_hash:
+                raise ValueError("The prose changed after manuscript review. Reload it before scene detection.")
             scenes = detect_scenes(text, self.provider, self.settings, self.cancel_event,
-                                   lambda stage, current, total: self.progress.emit(stage, current, total))
+                                   lambda stage, current, total: self.progress.emit(stage, current, total),
+                                   sections=self.sections)
             if self.cancel_event.is_set():
                 raise AnalysisCanceled()
             if source_hash(read_prose(self.path)) != source_hash(text):
@@ -353,11 +361,18 @@ class MainWindow(QMainWindow):
         self._make_actions()
         self._make_workspace()
         self._refresh()
+        self._restore_last_project()
 
     def _make_actions(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
         self.new_action = QAction("New Project…", self)
         self.open_action = QAction("Open Project…", self)
+        file_menu.addAction(self.new_action)
+        file_menu.addAction(self.open_action)
+        self.recent_menu = file_menu.addMenu("Open Recent")
+        self._recent_settings = QSettings("ProseToVideo", "ProseToVideo")
+        self._recent_projects = self._recent_settings.value("projects/recent", [], type=list)
+        self._update_recent_menu()
         self.save_action = QAction("Save Project", self)
         self.close_action = QAction("Close Project", self)
         self.settings_action = QAction("Video Output Settings…", self)
@@ -374,8 +389,7 @@ class MainWindow(QMainWindow):
             (self.settings_action, self._settings), (exit_action, self.close),
         ):
             action.triggered.connect(callback)
-        for action in (self.new_action, self.open_action, self.save_action, self.close_action,
-                       self.settings_action):
+        for action in (self.save_action, self.close_action, self.settings_action):
             file_menu.addAction(action)
         file_menu.addAction(self.ai_settings_action)
         file_menu.addAction(self.storyboard_settings_action)
@@ -406,7 +420,7 @@ class MainWindow(QMainWindow):
                       self.audio_info, self.settings_label):
             label.setWordWrap(True)
             label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.import_prose_button = QPushButton("Import Prose…")
+        self.import_prose_button = QPushButton("Choose Prose File…")
         self.import_audio_button = QPushButton("Import Audio…")
         self.import_prose_button.clicked.connect(self._import_prose)
         self.import_audio_button.clicked.connect(self._import_audio)
@@ -443,6 +457,9 @@ class MainWindow(QMainWindow):
         horizontal.addWidget(scroll)
         horizontal.addWidget(prose_panel)
         self.scenes_panel = ScenesPanel()
+        self.manuscript_panel = ManuscriptPanel()
+        self.manuscript_panel.navigate.connect(lambda start, end: self.prose_viewer.set_layer("scene", (start, end), scroll=True))
+        self.manuscript_panel.decision_changed.connect(self._manuscript_decision_changed)
         self.storyboard_panel = StoryboardPanel()
         self.image_prompt_panel = ImagePromptPanel()
         self.image_gallery_panel = ImageGalleryPanel()
@@ -459,6 +476,7 @@ class MainWindow(QMainWindow):
         self.workspace_tabs.addTab(self.scenes_panel, "Scenes")
         self.workspace_tabs.addTab(self.storyboard_panel, "Storyboard")
         self.workspace_tabs.addTab(self.visual_library_panel, "Visual Library")
+        self.workspace_tabs.addTab(self.manuscript_panel, "Manuscript")
         self.workspace_tabs.addTab(self.image_prompt_panel, "Image Prompts")
         self.workspace_tabs.addTab(self.image_gallery_panel, "Image Gallery")
         self.workspace_tabs.addTab(self.animation_panel, "AI Animation")
@@ -555,6 +573,7 @@ class MainWindow(QMainWindow):
         busy = self._task is not None or self._scene_task is not None or self._alignment_task is not None or self._storyboard_task is not None or self._entity_task is not None or self._prompt_task is not None or self._image_task is not None or self._render_task is not None or bool(self.production_dashboard.worker and self.production_dashboard.worker.isRunning()) or bool(self.quality_control_panel.worker and self.quality_control_panel.worker.isRunning())
         for action in (self.new_action, self.open_action):
             action.setEnabled(not busy)
+        self.recent_menu.setEnabled(bool(self._recent_projects) and not busy)
         for action in (self.save_action, self.close_action, self.settings_action):
             action.setEnabled(session is not None and not busy)
         self.import_prose_button.setEnabled(session is not None and not busy)
@@ -612,6 +631,8 @@ class MainWindow(QMainWindow):
 
     def _set_session(self, session: ProjectSession | None, load_prose: bool = True) -> None:
         self.session = session
+        if session is not None:
+            self._remember_recent_project(session.root)
         self.production_dashboard.bind(session)
         self.quality_control_panel.bind(session)
         self.video_production_panel.player.stop()
@@ -655,6 +676,7 @@ class MainWindow(QMainWindow):
         self._highlighted_span = None
         self.scenes_panel.set_alignment(None)
         self.scenes_panel.set_scenes([])
+        self.manuscript_panel.bind(session.database if session else None)
         self.prose_viewer.clear_story()
         self._refresh()
         if session and load_prose:
@@ -688,18 +710,31 @@ class MainWindow(QMainWindow):
             self._source_stamp = (path.stat().st_mtime_ns, path.stat().st_size)
             self._display_stats = stats
             self.prose_viewer.show_text(text)
+            self.manuscript_panel.bind(session.database, text)
             self._load_scene_records(text)
             self._load_current_alignment()
             self._refresh()
 
         self._start_task(load, loaded, "Could not read prose")
 
+    def _manuscript_decision_changed(self, inclusion_changed: bool) -> None:
+        # Existing approvals remain on disk. A changed inclusion needs a fresh
+        # alignment before production may use its old word-to-source mapping.
+        if inclusion_changed and self.session and self._alignment:
+            self.session.database.invalidate_alignment()
+            self._alignment = None
+            self.scenes_panel.set_alignment(None)
+        if inclusion_changed and self.session:
+            self._load_scene_records(self._source_text)
+        self._refresh()
+
     def _load_scene_records(self, text: str) -> None:
         if self.session is None:
             return
         try:
             digest, scenes = self.session.database.load_scenes()
-            self.scenes_panel.set_scenes(scenes, bool(digest and digest != source_hash(text)))
+            self.scenes_panel.set_scenes(scenes, bool(digest and
+                (digest != source_hash(text) or not scenes_match_inclusion(scenes, self.manuscript_panel.sections))))
             if self._alignment:
                 self._load_current_alignment()
         except ProjectDatabaseError as exc:
@@ -758,8 +793,13 @@ class MainWindow(QMainWindow):
         if self.session is None or not self._source_text or not self._audio_hash:
             return
         run = self.session.database.load_alignment(source_hash(self._source_text), self._audio_hash)
+        if run and (run.inclusion_fingerprint != inclusion_fingerprint(self.manuscript_panel.sections)) and (
+                run.inclusion_fingerprint is not None or any(not s.included or s.heading for s in self.manuscript_panel.sections)):
+            run = None
+            self.scenes_panel.stage_label.setText("Audio alignment needs reconciliation with manuscript inclusion")
         self._alignment = run
         self.scenes_panel.set_alignment(run)
+        self.manuscript_panel.set_alignment(run)
         if run is None and self.session.database.load_alignment() is not None:
             self.scenes_panel.stage_label.setText("Audio alignment outdated: prose or audio changed")
         self.audio_player.waveform.set_timings(run.scenes if run else [])
@@ -1002,11 +1042,7 @@ class MainWindow(QMainWindow):
             self._show_error("AI settings", str(exc))
             return
         if dialog.exec() == dialog.Accepted:
-            try:
-                save_ai_settings(dialog.values())
-                self.statusBar().showMessage("AI scene settings saved", 5_000)
-            except ValueError as exc:
-                self._show_error("AI settings", str(exc))
+            self.statusBar().showMessage("AI scene settings saved", 5_000)
 
     def _detect_scenes(self) -> None:
         if self.session is None:
@@ -1032,7 +1068,9 @@ class MainWindow(QMainWindow):
             )
             if answer != QMessageBox.Yes:
                 return
-        task = SceneTask(path, provider, settings, self)
+        task = SceneTask(path, provider, settings, self,
+                         sections=self.manuscript_panel.sections,
+                         expected_hash=source_hash(self._source_text))
         self._scene_task = task
         task.progress.connect(self.scenes_panel.set_progress)
         task.succeeded.connect(self._scene_analysis_ready)
@@ -1175,10 +1213,17 @@ class MainWindow(QMainWindow):
 
     def _new_project(self) -> None:
         dialog = NewProjectDialog(self)
-        if dialog.exec() != dialog.Accepted:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        prose_file = dialog.prose_file
         try:
-            self._set_session(create_project(dialog.parent_directory, dialog.project_name))
+            session = create_project(dialog.parent_directory, dialog.project_name)
+            self._set_session(session)
+            if prose_file is not None:
+                self._start_task(
+                    lambda: import_prose(session, prose_file),
+                    lambda result: self._set_session(result), "Could not import prose"
+                )
         except ProjectError as exc:
             self._show_error("Could not create project", str(exc))
 
@@ -1186,10 +1231,55 @@ class MainWindow(QMainWindow):
         directory = QFileDialog.getExistingDirectory(self, "Open Project Directory", str(Path.home()))
         if not directory:
             return
+        self._open_project_at(Path(directory))
+
+    def _open_project_at(self, directory: Path, *, from_recent: bool = False) -> None:
         try:
-            self._set_session(open_project(Path(directory)))
+            self._set_session(open_project(directory))
         except ProjectError as exc:
+            if from_recent and not directory.is_dir():
+                self._recent_projects = [path for path in self._recent_projects if path != str(directory)]
+                self._save_recent_projects()
             self._show_error("Could not open project", str(exc))
+
+    def _restore_last_project(self) -> None:
+        for path in list(self._recent_projects):
+            directory = Path(path)
+            try:
+                session = open_project(directory)
+            except ProjectError as exc:
+                LOGGER.warning("Could not restore project %s: %s", directory, exc)
+                if not directory.is_dir():
+                    self._recent_projects.remove(path)
+                    self._save_recent_projects()
+                continue
+            self._set_session(session)
+            return
+
+    def _remember_recent_project(self, directory: Path) -> None:
+        path = str(directory.resolve())
+        self._recent_projects = [path, *(item for item in self._recent_projects if item != path)][:MAX_RECENT_PROJECTS]
+        self._save_recent_projects()
+
+    def _save_recent_projects(self) -> None:
+        self._recent_settings.setValue("projects/recent", self._recent_projects)
+        self._update_recent_menu()
+        self.recent_menu.setEnabled(bool(self._recent_projects) and self.open_action.isEnabled())
+
+    def _update_recent_menu(self) -> None:
+        self.recent_menu.clear()
+        for path in self._recent_projects:
+            directory = Path(path)
+            action = self.recent_menu.addAction(f"{directory.name} — {directory.parent}")
+            action.setToolTip(path)
+            action.triggered.connect(lambda checked=False, path=path: self._open_project_at(Path(path), from_recent=True))
+        if self._recent_projects:
+            self.recent_menu.addSeparator()
+            self.recent_menu.addAction("Clear Recent Projects", self._clear_recent_projects)
+
+    def _clear_recent_projects(self) -> None:
+        self._recent_projects = []
+        self._save_recent_projects()
 
     def _save_project(self) -> None:
         if self.session is None:
@@ -1393,7 +1483,7 @@ class MainWindow(QMainWindow):
                 scenes = [self.scenes_panel.scenes[choices.row(item)] for item in choices.selectedItems()]
             else:
                 scenes = [self.scenes_panel.current_scene()]
-            scenes = [s for s in scenes if s]
+            scenes = [s for s in scenes if s and s.production_included]
             if not scenes: raise ValueError('Select a narrative scene')
             settings = load_ai_settings()
             provider = make_provider(settings)
@@ -1459,8 +1549,8 @@ class MainWindow(QMainWindow):
         try:
             self._require_current_scenes()
             scenes = scenes_override if scenes_override is not None else self.scenes_panel.scenes if all_scenes else [self.scenes_panel.current_scene()]
-            scenes = [s for s in scenes if s]
-            if not scenes: raise ValueError("Select a narrative scene")
+            scenes = [s for s in scenes if s and s.production_included]
+            if not scenes: raise ValueError("Select an included narrative scene")
             existing = [s for s in scenes if self.session.database.load_storyboard(s.identifier)]
             if existing:
                 answer = QMessageBox.question(self, "Replace storyboards?",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -36,6 +37,7 @@ class AISettings:
     provider: str = "OpenAI"
     model: str = "gpt-6-luna"
     credential_env: str = "OPENAI_API_KEY"
+    credential_file: str = ""
     temperature: float | None = None
     max_output_tokens: int = 2500
     context_tokens: int = 128000
@@ -45,8 +47,10 @@ class AISettings:
     def validate(self) -> None:
         if self.provider != "OpenAI":
             raise ValueError(f"Unsupported AI provider: {self.provider}")
-        if not self.model.strip() or not self.credential_env.isidentifier():
-            raise ValueError("Enter a model and a valid credential environment variable name")
+        if not self.model.strip():
+            raise ValueError("Enter a model")
+        if not self.credential_file and not self.credential_env.isidentifier():
+            raise ValueError("Enter a valid credential environment variable name or choose an API key file")
         if self.temperature is not None and not 0 <= self.temperature <= 2:
             raise ValueError("Temperature must be between 0 and 2")
         if (self.max_output_tokens < 256 or self.context_tokens < self.max_output_tokens + 3000
@@ -60,12 +64,26 @@ class SceneProvider(Protocol):
     def describe_scene(self, scene_text: str) -> SceneDescription: ...
 
 
+def read_api_key(credential_env: str = "OPENAI_API_KEY", credential_file: str = "") -> str:
+    """Read a key at use time without copying it into project or app settings."""
+    if credential_file:
+        try:
+            key = Path(credential_file).expanduser().read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            raise ValueError("Could not read the selected API key file") from exc
+        if not key:
+            raise ValueError("The selected API key file is empty")
+        return key
+    key = os.environ.get(credential_env)
+    if not key:
+        raise ValueError(f"Set the {credential_env} environment variable or select an API key file in AI settings")
+    return key
+
+
 class OpenAIProvider:
     def __init__(self, settings: AISettings):
         settings.validate()
-        key = os.environ.get(settings.credential_env)
-        if not key:
-            raise ValueError(f"Set the {settings.credential_env} environment variable before detecting scenes")
+        key = read_api_key(settings.credential_env, settings.credential_file)
         try:
             from openai import OpenAI
         except ImportError as exc:
@@ -148,7 +166,10 @@ class OpenAIProvider:
             "the assigned passage; never reveal later events. Ground characters, clothing and props in "
             "the source and keep recurring identities consistent. Make foreground, background, actions "
             "and visual description concrete. Cinematic interpretation may fill framing and lighting, "
-            "but do not invent major facts. Use only valid IDs and controlled shot types and camera "
+            "but do not invent major facts. Preserve radio, television, video-call, drone and surveillance "
+            "viewpoint context: callers and remote subjects are not physically with the observer. "
+            "Use explanatory views for exposition and let dialogue span several lines when useful. "
+            "Distinguish source facts from proposed visual details. Use only valid IDs and controlled shot types and camera "
             "movements. Do not return or invent timestamps.",
             payload, ShotIdeas)
 
@@ -159,7 +180,9 @@ class OpenAIProvider:
             "source prose and approved visual details are authoritative. Depict only the selected "
             "moment; neighboring shots establish continuity but never authorize future reveals. "
             "Preserve entity names, approved appearance, variant, spatial relationships, camera "
-            "framing, and visual style. Describe foreground, middle ground, background, environment, "
+            "framing, visual style and the shot's viewpoint context. A remote caller or surveillance subject "
+            "must not be placed at the observer's physical location. Keep screen content distinct from the device. "
+            "Describe foreground, middle ground, background, environment, "
             "actions, materials, light, and composition concretely where supported. Do not invent "
             "major actions or characters. Keep uncertain facts unspecified and flag conflicts in "
             "warnings. Reference-image metadata is context only; no image binaries are supplied. "

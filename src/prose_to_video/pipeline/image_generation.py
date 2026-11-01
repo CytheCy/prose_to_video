@@ -3,6 +3,7 @@ import hashlib
 import json
 import time
 from pathlib import Path
+from PySide6.QtCore import QSettings
 from prose_to_video.models.generated_image import utcnow
 from prose_to_video.models.image_job import ImageGenerationSettings, ImageJob, ImageReference, ImageRequest
 from prose_to_video.models.image_prompt import fingerprint
@@ -15,7 +16,11 @@ from prose_to_video.storage.visual_library import VisualLibrary
 
 
 def make_image_provider(settings: ImageGenerationSettings, root=None):
-    if settings.provider == 'OpenAI': return OpenAIImageProvider()
+    if settings.provider == 'OpenAI':
+        preferences = QSettings('ProseToVideo', 'ProseToVideo')
+        return OpenAIImageProvider(
+            credential_env=str(preferences.value('ai/credential_env', 'OPENAI_API_KEY')),
+            credential_file=str(preferences.value('ai/credential_file', '')))
     if settings.provider == 'ComfyUI':
         path=Path(settings.workflow_path)
         if not path.is_absolute() and root: path=Path(root)/path

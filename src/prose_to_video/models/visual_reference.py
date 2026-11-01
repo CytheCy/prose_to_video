@@ -55,6 +55,8 @@ class VisualEntity(BaseModel):
     review_status: str = 'Suggested'
     user_notes: str = ''
     source_hash: str | None = None
+    parent_entity_id: str | None = None
+    spatial_relationship: str = ""
     created_at: datetime = Field(default_factory=now)
     modified_at: datetime = Field(default_factory=now)
 
@@ -73,6 +75,11 @@ class AppearanceVariant(BaseModel):
     entity_id: str
     name: str = Field(min_length=1)
     description: str = ''
+    period: str = ''
+    age_min: int | None = Field(default=None, ge=0, le=120)
+    age_max: int | None = Field(default=None, ge=0, le=120)
+    clothing: str = ''
+    source_evidence_ids: list[str] = Field(default_factory=list)
     scene_ids: list[str] = Field(default_factory=list)
     shot_ids: list[str] = Field(default_factory=list)
     status: str = 'Suggested'
@@ -83,6 +90,12 @@ class AppearanceVariant(BaseModel):
     def valid_status(cls, value):
         if value not in REVIEW_STATUSES: raise ValueError('Invalid variant status')
         return value
+
+    @model_validator(mode='after')
+    def valid_age_range(self):
+        if self.age_min is not None and self.age_max is not None and self.age_max < self.age_min:
+            raise ValueError('Appearance age range is reversed')
+        return self
 
 class ReferenceAsset(BaseModel):
     model_config = ConfigDict(extra='forbid')

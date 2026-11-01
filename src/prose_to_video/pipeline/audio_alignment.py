@@ -13,6 +13,8 @@ from prose_to_video.pipeline.text_matching import (derive_scene_timings, derive_
                                                     match_words, sentence_ranges)
 from prose_to_video.storage.database import ProjectDatabase
 from prose_to_video.utils.prose import read_prose
+from prose_to_video.pipeline.manuscript import included_ranges, inclusion_fingerprint
+from prose_to_video.storage.manuscript import ManuscriptStore
 
 
 def align_project(prose_path: Path, audio_path: Path, scenes: list[Scene], db: ProjectDatabase,
@@ -46,13 +48,16 @@ def align_project(prose_path: Path, audio_path: Path, scenes: list[Scene], db: P
     if cancel.is_set(): raise AlignmentCanceled("Audio alignment canceled")
     progress("Matching transcript to prose", 0, 1)
     spoken = [word for segment in segments for word in segment.words]
-    words, passages, issues = match_words(text, spoken)
+    sections = ManuscriptStore(db).sections(text)
+    production_ranges = included_ranges(sections)
+    words, passages, issues = match_words(text, spoken, production_ranges)
     progress("Matching transcript to prose", 1, 1)
     if cancel.is_set(): raise AlignmentCanceled("Audio alignment canceled")
     progress("Calculating sentence and paragraph times", 0, 1)
     sentences, paragraphs = derive_spans(text, words)
     for sentence in sentences:
-        if sentence.status == "unresolved" and any(w.source_start >= sentence.source_start and w.source_end <= sentence.source_end for w in words):
+        if sentence.status == "unresolved" and any(w.status != "excluded" and
+                w.source_start >= sentence.source_start and w.source_end <= sentence.source_end for w in words):
             issues.append(AlignmentIssue(kind="unmatched_sentence", message="No verified speech for manuscript sentence",
                                          source_start=sentence.source_start, source_end=sentence.source_end))
     timings = derive_scene_timings(scenes, words)
@@ -66,6 +71,7 @@ def align_project(prose_path: Path, audio_path: Path, scenes: list[Scene], db: P
                        transcription_model=settings.model,
                        alignment_model=provider.alignment_model,
                        device=device, precision=precision, config_fingerprint=fingerprint,
+                       inclusion_fingerprint=inclusion_fingerprint(sections),
                        transcript=segments, passages=passages, words=words,
                        sentences=sentences, paragraphs=paragraphs, scenes=timings, issues=issues)
     progress("Saving results", 0, 1)

@@ -16,6 +16,9 @@ from prose_to_video.storage.generated_images import ImageStore
 from prose_to_video.storage.generated_videos import VideoStore
 from prose_to_video.storage.production import ProductionStore
 from prose_to_video.storage.visual_library import VisualLibrary
+from prose_to_video.storage.manuscript import ManuscriptStore
+from prose_to_video.pipeline.manuscript import analysis_report
+from prose_to_video.utils.prose import read_prose
 
 
 class QualityController:
@@ -26,22 +29,56 @@ class QualityController:
     def inspect(self, run=None, *, persist=True):
         project = self.session.project
         issues = []
-        def add(category, severity, description, scene_id=None, shot_id=None, asset_id=None, code=''):
+        def add(category, severity, description, scene_id=None, shot_id=None, asset_id=None, code='', evidence=None):
             identity = ':'.join([project.identifier, run.identifier if run else '', category,
                                  scene_id or '', shot_id or '', asset_id or '', code, description])
             issues.append(QualityIssue(identifier=str(uuid5(NAMESPACE_URL, identity)),
                 run_id=run.identifier if run else None,
                 project_id=project.identifier, category=category, severity=severity,
                 description=description, scene_id=scene_id, shot_id=shot_id, asset_id=asset_id,
-                evidence={'code': code}, suggested_correction={
+                evidence={'code': code, **(evidence or {})}, suggested_correction={
                     'Timing': 'Open Storyboard', 'Visual Continuity': 'Open Visual Library',
                     'Image': 'Open Image Gallery', 'Animation': 'Open AI Animation',
                     'Render': 'Open Video Production'}.get(category, 'Review source material')))
+        prose_path = project.resolved_prose(self.session.root)
+        if prose_path and prose_path.is_file():
+            text = read_prose(prose_path)
+            sections = ManuscriptStore(self.session.database).sections(text)
+            report = analysis_report(text, sections)
+            for section in sections:
+                if section.classification == 'Editorial Note' and section.included:
+                    add('Manuscript', 'Warning', 'Possible editorial instruction is included in narration',
+                        code='editorial_included', evidence={'source_start': section.start, 'source_end': section.end})
+                if section.review:
+                    add('Manuscript', 'Suggestion', f'Review section: {section.heading or "Preamble"}',
+                        code='section_review', evidence={'source_start': section.start, 'source_end': section.end})
+            for conflict in report['chronology_conflicts']:
+                add('Narrative', 'Warning', f"Possible age/year conflict for {conflict['character']}",
+                    code='chronology_conflict', evidence=conflict)
         for warning in VisualLibrary(self.session.root).inspect_continuity():
             add('Visual Continuity', 'Error' if warning.severity == 'confirmed' else 'Warning',
                 warning.message, shot_id=warning.shot_ids[0] if warning.shot_ids else None,
                 code=warning.code)
         _, scenes = self.session.database.load_scenes()
+        if prose_path and prose_path.is_file():
+            library = VisualLibrary(self.session.root)
+            for entity in library.entities('Character'):
+                variants = library.variants(entity.identifier)
+                for claim in report['chronology_claims']:
+                    if claim['character'].casefold() not in {entity.name.casefold(),
+                            *(alias.casefold() for alias in entity.aliases)}:
+                        continue
+                    scene = next((s for s in scenes if s.start <= claim['source_start'] < s.end), None)
+                    if scene is None: continue
+                    for variant in variants:
+                        if scene.identifier not in variant.scene_ids or variant.age_min is None and variant.age_max is None:
+                            continue
+                        if ((variant.age_min is not None and claim['age'] < variant.age_min) or
+                                (variant.age_max is not None and claim['age'] > variant.age_max)):
+                            add('Visual Continuity', 'Warning',
+                                f'{entity.name} age {claim["age"]} conflicts with variant {variant.name}',
+                                scene_id=scene.identifier, code='age_variant_mismatch',
+                                evidence={'claim': claim, 'variant_id': variant.identifier})
         alignment = self.session.database.load_alignment()
         if not alignment:
             add('Timing','Error','Narration alignment is missing',code='missing_alignment')
@@ -53,11 +90,24 @@ class QualityController:
         images = ImageStore(self.session.root)
         videos = VideoStore(self.session.root)
         for scene in scenes:
+            if not scene.production_included:
+                continue
             board = self.session.database.load_storyboard(scene.identifier)
             if not board:
                 add('Narrative', 'Error', 'Scene has no storyboard', scene.identifier, code='missing_storyboard')
                 continue
+            prior_description = None
             for shot in board.shots:
+                if scene.viewpoint_category in {'radio', 'television', 'surveillance', 'drone', 'video call', 'recorded footage'} and shot.viewpoint.category == 'direct':
+                    add('Narrative', 'Suggestion', 'Direct shot in a mediated scene: review observer and remote locations',
+                        scene.identifier, shot.identifier, code='viewpoint_review')
+                if 'memory' in scene.narrative_formats and shot.visual_treatment == 'literal':
+                    add('Narrative', 'Suggestion', 'Review whether this literal view depicts a memory or present action',
+                        scene.identifier, shot.identifier, code='memory_period_review')
+                if prior_description == shot.visual_description and prior_description:
+                    add('Narrative', 'Suggestion', 'Consecutive shots repeat the same visual description',
+                        scene.identifier, shot.identifier, code='repeated_visual')
+                prior_description = shot.visual_description
                 if not shot.original_prose.strip() or not shot.visual_description.strip():
                     add('Narrative', 'Error', 'Shot has missing prose or visual description', scene.identifier,
                         shot.identifier, code='missing_narrative')

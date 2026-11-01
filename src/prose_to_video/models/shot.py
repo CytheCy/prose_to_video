@@ -7,6 +7,30 @@ import math
 from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+
+class ViewpointContext(BaseModel):
+    """Distinguish an observer's location from a depicted remote location."""
+    category: str = "direct"
+    observer: str | None = None
+    physical_location: str | None = None
+    depicted_location: str | None = None
+    media_source: str | None = None
+    live_status: str = "unknown"
+    camera_control: str = "unknown"
+    display_framing: str = "unknown"
+    deliberate_external_view: bool = False
+
+    @model_validator(mode="after")
+    def valid(self):
+        from prose_to_video.pipeline.manuscript import VIEWPOINTS
+        if self.category not in VIEWPOINTS or self.live_status not in {"live", "recorded", "unknown"}:
+            raise ValueError("Invalid viewpoint context")
+        if self.display_framing not in {"room", "device", "screen", "external", "unknown"}:
+            raise ValueError("Invalid display framing")
+        if self.category != "direct" and self.display_framing == "external" and not self.deliberate_external_view:
+            raise ValueError("External view of mediated events must be deliberate")
+        return self
+
 SHOT_TYPES = ("Establishing", "Extreme wide", "Wide", "Medium", "Close-up", "Extreme close-up", "Over-the-shoulder", "Point-of-view", "Insert", "Environmental detail")
 CAMERA_MOVEMENTS = ("Static", "Slow pan left", "Slow pan right", "Pan up", "Pan down", "Tilt up", "Tilt down", "Push in", "Pull back", "Diagonal pan", "Combined pan and zoom", "Custom", "Tracking", "Slow lateral", "Aerial")
 STATUSES = ("Not reviewed", "Reviewed", "Manually edited")
@@ -77,6 +101,9 @@ class Shot(BaseModel):
     transition: str = "Cut"
     suggested_motion: str = "None"
     ai_notes: str = ""
+    viewpoint: ViewpointContext = Field(default_factory=ViewpointContext)
+    visual_treatment: str = "literal"
+    fact_provenance: dict[str, str] = Field(default_factory=dict)
     entity_refs: list[str] = Field(default_factory=list)
     review_status: str = "Not reviewed"
     manually_edited: bool = False
@@ -97,6 +124,11 @@ class Shot(BaseModel):
             raise ValueError("Unknown shot type or camera movement")
         if self.review_status not in STATUSES or self.timing_status not in TIMING_STATUSES:
             raise ValueError("Invalid shot status")
+        if self.visual_treatment not in {"literal", "establishing", "illustrative", "montage", "screen", "symbolic"}:
+            raise ValueError("Invalid visual treatment")
+        if any(value not in {"source", "approved_reference", "inferred", "proposed", "uncertain"}
+               for value in self.fact_provenance.values()):
+            raise ValueError("Invalid visual fact provenance")
         for value in (self.audio_start, self.audio_end):
             if value is not None and (not math.isfinite(value) or value < 0):
                 raise ValueError("Invalid shot timestamp")

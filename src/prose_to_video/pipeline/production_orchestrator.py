@@ -113,6 +113,13 @@ class ProductionOrchestrator:
         text = read_prose(prose) if prose_digest else ''
         scene_hash, scenes = self.session.database.load_scenes()
         alignment = self.session.database.load_alignment(source_hash(text), audio_digest) if prose_digest and audio_digest else None
+        if alignment:
+            from prose_to_video.pipeline.manuscript import inclusion_fingerprint
+            from prose_to_video.storage.manuscript import ManuscriptStore
+            sections = ManuscriptStore(self.session.database).sections(text)
+            if alignment.inclusion_fingerprint != inclusion_fingerprint(sections) and (
+                    alignment.inclusion_fingerprint is not None or any(not s.included or s.heading for s in sections)):
+                alignment = None
         return prose, audio, text, prose_digest, audio_digest, scene_hash, scenes, alignment
 
     def graph(self, profile: ProductionProfile, run_id: str = '') -> list[ProductionTask]:
@@ -130,8 +137,13 @@ class ProductionOrchestrator:
             return task
         source = add('source', inputs={'prose': prose_hash, 'audio': audio_hash},
                      reused=bool(prose_hash and audio_hash))
-        scenes_current = bool(scenes and scene_hash == source_hash(text))
+        from prose_to_video.pipeline.manuscript import scenes_match_inclusion
+        from prose_to_video.storage.manuscript import ManuscriptStore
+        sections = ManuscriptStore(self.session.database).sections(text)
+        scenes_current = bool(scenes and scene_hash == source_hash(text) and
+                              scenes_match_inclusion(scenes, sections))
         scene_task = add('scenes', deps=[source], inputs={'prose': prose_hash,
+            'inclusion': [(s.identifier, s.included) for s in sections],
             'settings': profile.narrative_settings}, reused=scenes_current)
         aligned = bool(alignment and alignment.status == 'complete')
         align_task = add('alignment', deps=[source, scene_task], inputs={'prose': prose_hash,
@@ -151,6 +163,8 @@ class ProductionOrchestrator:
                      if self.session.database.load_storyboard(scene.identifier) else [])]
         selected = set(select_animations(all_shots, profile, video_store.settings().estimated_cost_per_clip))
         for scene in scenes if scenes_current else []:
+            if not scene.production_included:
+                continue
             entity_ready = any(scene.identifier in library.scenes_for(e.identifier) for e in library.entities())
             entity_task = add('entities', scene.identifier, [scene_task],
                 {'scene': scene.model_dump(mode='json')}, entity_ready, scene_id=scene.identifier)
@@ -385,7 +399,9 @@ class ProductionOrchestrator:
         if task.kind == 'source':
             if not prose or not prose.is_file() or not audio or not audio.is_file(): raise ValueError('Sources are missing')
         elif task.kind == 'scenes':
-            found = detect_scenes(text, self._provider(run), AISettings(**run.profile.narrative_settings), self.cancel_event)
+            from prose_to_video.storage.manuscript import ManuscriptStore
+            found = detect_scenes(text, self._provider(run), AISettings(**run.profile.narrative_settings),
+                                  self.cancel_event, sections=ManuscriptStore(self.session.database).sections(text))
             self.session.database.replace_scenes(text, found)
             task.output_ids = [s.identifier for s in found]
         elif task.kind == 'alignment':

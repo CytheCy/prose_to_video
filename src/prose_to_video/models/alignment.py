@@ -126,6 +126,7 @@ class AlignmentRun(Record):
     device: str
     precision: str
     config_fingerprint: str
+    inclusion_fingerprint: str | None = None
     status: str = "complete"
     transcript: list[TranscriptSegment] = Field(default_factory=list)
     passages: list[TextPassage] = Field(default_factory=list)

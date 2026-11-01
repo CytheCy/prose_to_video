@@ -19,7 +19,7 @@ def update_shot(board: Storyboard, identifier: str, changes: dict, text: str,
                "camera_framing", "camera_angle", "camera_position", "camera_movement", "lighting",
                "atmosphere", "shot_type", "transition", "suggested_motion", "ai_notes", "review_status",
                "audio_start", "audio_end", "timing_status", "timing_note", "characters", "objects",
-               "character_appearances", "entity_refs"}
+               "character_appearances", "entity_refs", "viewpoint", "visual_treatment", "fact_provenance"}
     if set(changes) - allowed:
         raise ValueError("Unsupported shot edit")
     shots = list(board.shots)

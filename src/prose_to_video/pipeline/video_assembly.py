@@ -83,7 +83,7 @@ def build_render_plan(session, settings: RenderSettings, *, scope: str = 'full',
     if not project.audio_duration or not math.isfinite(project.audio_duration):
         report.add('error', 'audio_duration', 'Narration duration is unavailable')
         return None, report
-    scenes = session.database.load_scenes()[1]
+    scenes = [scene for scene in session.database.load_scenes()[1] if scene.production_included]
     if not scenes:
         report.add('error', 'missing_scenes', 'No narrative scenes exist')
         return None, report

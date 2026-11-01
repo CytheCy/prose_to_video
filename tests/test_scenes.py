@@ -11,6 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from prose_to_video.models.scene import Scene, source_hash, validate_partition
+from prose_to_video.pipeline.manuscript import parse_manuscript, scenes_match_inclusion
 from prose_to_video.pipeline.providers import AISettings, BoundaryProposal, OpenAIProvider, SceneDescription
 from prose_to_video.pipeline.scene_detection import (AnalysisCanceled, detect_scenes,
                                                       make_chunks, merge_with_next,
@@ -64,7 +65,7 @@ def test_scene_model_and_partition_validation() -> None:
         validate_partition(TEXT, [scenes[0].model_copy(update={"text": "X" + scenes[0].text[1:]}), scenes[1]])
 
 
-def test_chunk_offsets_and_no_artificial_boundaries() -> None:
+def test_chunk_offsets_and_one_scene_per_paragraph() -> None:
     text = ("A" * 800 + "\n\n") * 6 + "At the station, Ben arrives.\n\n" + ("B" * 800 + "\n\n") * 5
     chunks = make_chunks(text, 1800, 250)
     assert len(chunks) > 2
@@ -75,7 +76,7 @@ def test_chunk_offsets_and_no_artificial_boundaries() -> None:
     settings = AISettings(chunk_chars=1800, overlap_chars=250)
     scenes = detect_scenes(text, MockProvider(), settings)
     validate_partition(text, scenes)
-    assert [s.start for s in scenes] == [0, text.index("At the station")]
+    assert [s.start for s in scenes] == paragraph_starts(text)
     assert paragraph_starts(text)[0] == 0
     assert "Before\n***\nAfter".index("***") in paragraph_starts("Before\n***\nAfter")
 
@@ -90,16 +91,63 @@ def test_chunk_input_budget_for_many_short_paragraphs() -> None:
                                            AISettings(chunk_chars=1200, overlap_chars=100)))
 
 
-def test_invalid_ai_response_and_cancellation() -> None:
+def test_paragraph_boundaries_do_not_depend_on_ai_and_cancellation() -> None:
     class BadProvider(MockProvider):
         def propose_boundaries(self, labeled_text: str) -> BoundaryProposal:
-            return BoundaryProposal(starts=[99999])
-    with pytest.raises(ValueError, match="invalid paragraph ID"):
-        detect_scenes(TEXT, BadProvider(), AISettings(chunk_chars=1000, overlap_chars=100))
+            raise AssertionError("Paragraph boundaries must not be proposed by AI")
+    scenes = detect_scenes(TEXT, BadProvider(), AISettings(chunk_chars=1000, overlap_chars=100))
+    assert [scene.start for scene in scenes] == paragraph_starts(TEXT)
     cancel = Event()
     cancel.set()
     with pytest.raises(AnalysisCanceled):
         detect_scenes(TEXT, MockProvider(), AISettings(), cancel)
+
+
+def test_each_line_paragraph_within_heading_section_is_a_scene() -> None:
+    text = "# Part One\nFirst paragraph.\nSecond paragraph.\n# Part Two\nThird paragraph.\n"
+    scenes = detect_scenes(text, MockProvider(), AISettings())
+    assert [scene.text for scene in scenes] == [
+        "# Part One\nFirst paragraph.\n", "Second paragraph.\n",
+        "# Part Two\nThird paragraph.\n",
+    ]
+    assert all(scene.production_included for scene in scenes)
+    validate_partition(text, scenes)
+
+
+def test_heading_text_is_not_used_to_describe_or_classify_scene() -> None:
+    class CapturingProvider(MockProvider):
+        passages: list[str]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.passages = []
+
+        def describe_scene(self, scene_text: str) -> SceneDescription:
+            self.passages.append(scene_text)
+            return super().describe_scene(scene_text)
+
+    text = "# Radio plays in cafe\nAda walks into the garden.\nShe waters the flowers.\n"
+    provider = CapturingProvider()
+    scenes = detect_scenes(text, provider, AISettings())
+    assert provider.passages == ["Ada walks into the garden.", "She waters the flowers."]
+    assert [scene.viewpoint_category for scene in scenes] == ["direct", "direct"]
+    assert scenes[0].text.startswith("# Radio plays in cafe\n")
+
+
+def test_heading_only_section_does_not_create_a_scene() -> None:
+    text = "First.\n# Empty\n# Next\nSecond.\n"
+    scenes = detect_scenes(text, MockProvider(), AISettings())
+    assert [scene.text for scene in scenes] == ["First.\n", "# Empty\n# Next\nSecond.\n"]
+    assert scenes_match_inclusion(scenes, parse_manuscript(text))
+    with pytest.raises(ValueError, match="no prose paragraphs"):
+        detect_scenes("# Heading only\n", MockProvider(), AISettings())
+
+
+def test_line_paragraphs_with_blank_lines_and_crlf() -> None:
+    text = "First.\r\nSecond.\r\n\r\nThird.\r\n"
+    scenes = detect_scenes(text, MockProvider(), AISettings())
+    assert [scene.text for scene in scenes] == ["First.\r\n", "Second.\r\n\r\n", "Third.\r\n"]
+    validate_partition(text, scenes)
 
 
 def test_provider_settings_and_structured_request(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -21,12 +21,20 @@ class NewProjectDialog(QDialog):
         self.parent_edit = QLineEdit(str(Path.home()))
         browse = QPushButton("Browse…")
         browse.clicked.connect(self._browse)
+        self.prose_edit = QLineEdit()
+        self.prose_edit.setPlaceholderText("Optional UTF-8 .md or .txt file")
+        prose_browse = QPushButton("Browse…")
+        prose_browse.clicked.connect(self._browse_prose)
         location = QHBoxLayout()
         location.addWidget(self.parent_edit)
         location.addWidget(browse)
+        prose_location = QHBoxLayout()
+        prose_location.addWidget(self.prose_edit)
+        prose_location.addWidget(prose_browse)
         form = QFormLayout()
         form.addRow("Project name:", self.name_edit)
         form.addRow("Store in:", location)
+        form.addRow("Source prose:", prose_location)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
@@ -39,6 +47,14 @@ class NewProjectDialog(QDialog):
         directory = QFileDialog.getExistingDirectory(self, "Choose Parent Directory", self.parent_edit.text())
         if directory:
             self.parent_edit.setText(directory)
+
+    def _browse_prose(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Choose Source Prose", self.prose_edit.text() or str(Path.home()),
+            "Prose files (*.md *.txt)",
+        )
+        if filename:
+            self.prose_edit.setText(filename)
 
     def _accept(self) -> None:
         if not self.name_edit.text().strip() or not self.parent_edit.text().strip():
@@ -53,6 +69,11 @@ class NewProjectDialog(QDialog):
     @property
     def parent_directory(self) -> Path:
         return Path(self.parent_edit.text()).expanduser()
+
+    @property
+    def prose_file(self) -> Path | None:
+        value = self.prose_edit.text().strip()
+        return Path(value).expanduser() if value else None
 
 
 class SettingsDialog(QDialog):

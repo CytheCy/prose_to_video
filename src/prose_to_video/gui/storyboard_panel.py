@@ -2,9 +2,10 @@
 from __future__ import annotations
 from PySide6.QtCore import Qt, QRectF, Signal
 from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import (QComboBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget)
-from prose_to_video.models.shot import CAMERA_MOVEMENTS, SHOT_TYPES, Storyboard, Shot
+from prose_to_video.models.shot import CAMERA_MOVEMENTS, SHOT_TYPES, Storyboard, Shot, ViewpointContext
+from prose_to_video.pipeline.manuscript import VIEWPOINTS
 from prose_to_video.utils.media_info import format_duration
 
 class ShotTimeline(QWidget):
@@ -116,10 +117,24 @@ class StoryboardPanel(QGroupBox):
         self.shot_type = QComboBox(); self.shot_type.addItems(SHOT_TYPES)
         self.camera_movement = QComboBox(); self.camera_movement.addItems(CAMERA_MOVEMENTS)
         self.review_status = QComboBox(); self.review_status.addItems(("Not reviewed", "Reviewed", "Manually edited"))
+        self.visual_treatment = QComboBox(); self.visual_treatment.addItems(("literal", "establishing", "illustrative", "montage", "screen", "symbolic"))
+        self.viewpoint_category = QComboBox(); self.viewpoint_category.addItems(VIEWPOINTS)
+        self.physical_location = QLineEdit(); self.depicted_location = QLineEdit()
+        self.media_source = QLineEdit()
+        self.display_framing = QComboBox(); self.display_framing.addItems(("unknown", "room", "device", "screen", "external"))
+        self.deliberate_external_view = QCheckBox("Deliberate external view")
         self.audio_start = QLineEdit(); self.audio_start.setPlaceholderText("Unresolved")
         self.audio_end = QLineEdit(); self.audio_end.setPlaceholderText("Unresolved")
         for label, widget in (("Shot type", self.shot_type), ("Camera movement", self.camera_movement),
-                              ("Review status", self.review_status), ("Audio start (s)", self.audio_start),
+                              ("Review status", self.review_status),
+                              ("Visual treatment", self.visual_treatment),
+                              ("Viewpoint", self.viewpoint_category),
+                              ("Observer location", self.physical_location),
+                              ("Depicted location", self.depicted_location),
+                              ("Media source", self.media_source),
+                              ("Display framing", self.display_framing),
+                              ("External view", self.deliberate_external_view),
+                              ("Audio start (s)", self.audio_start),
                               ("Audio end (s)", self.audio_end)):
             form.addRow(label, widget)
         editor = QWidget(); editor.setLayout(form)
@@ -209,6 +224,14 @@ class StoryboardPanel(QGroupBox):
         self.shot_type.setCurrentText(shot.shot_type if shot else "Medium")
         self.camera_movement.setCurrentText(shot.camera_movement if shot else "Static")
         self.review_status.setCurrentText(shot.review_status if shot else "Not reviewed")
+        self.visual_treatment.setCurrentText(shot.visual_treatment if shot else "literal")
+        viewpoint = shot.viewpoint if shot else None
+        self.viewpoint_category.setCurrentText(viewpoint.category if viewpoint else "direct")
+        self.physical_location.setText(viewpoint.physical_location or "" if viewpoint else "")
+        self.depicted_location.setText(viewpoint.depicted_location or "" if viewpoint else "")
+        self.media_source.setText(viewpoint.media_source or "" if viewpoint else "")
+        self.display_framing.setCurrentText(viewpoint.display_framing if viewpoint else "unknown")
+        self.deliberate_external_view.setChecked(viewpoint.deliberate_external_view if viewpoint else False)
         self.audio_start.setText(str(shot.audio_start) if shot and shot.audio_start is not None else "")
         self.audio_end.setText(str(shot.audio_end) if shot and shot.audio_end is not None else "")
         self.original_prose.setPlainText(shot.original_prose if shot else "")
@@ -228,7 +251,16 @@ class StoryboardPanel(QGroupBox):
                 appearance[name.strip()] = description.strip()
         data["character_appearances"] = appearance
         data.update(shot_type=self.shot_type.currentText(), camera_movement=self.camera_movement.currentText(),
-                    review_status=self.review_status.currentText())
+                    review_status=self.review_status.currentText(),
+                    visual_treatment=self.visual_treatment.currentText())
+        viewpoint = self.current_shot().viewpoint.model_dump() if self.current_shot() else {}
+        viewpoint.update(category=self.viewpoint_category.currentText(),
+            physical_location=self.physical_location.text().strip() or None,
+            depicted_location=self.depicted_location.text().strip() or None,
+            media_source=self.media_source.text().strip() or None,
+            display_framing=self.display_framing.currentText(),
+            deliberate_external_view=self.deliberate_external_view.isChecked())
+        data['viewpoint'] = ViewpointContext.model_validate(viewpoint)
         for name, widget in (("audio_start",self.audio_start),("audio_end",self.audio_end)):
             data[name] = float(widget.text()) if widget.text().strip() else None
         data["timing_status"] = "fully timed" if data["audio_start"] is not None and data["audio_end"] is not None else "partially timed" if any(data[n] is not None for n in ("audio_start","audio_end")) else "untimed"

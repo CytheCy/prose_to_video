@@ -1,4 +1,4 @@
-"""Chunked scene detection with source-owned offsets and complete partition checks."""
+"""Paragraph-based scenes with source-owned offsets and complete partition checks."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from threading import Event
 from typing import Callable
 
 from prose_to_video.models.scene import Scene, validate_partition
+from prose_to_video.pipeline.manuscript import ManuscriptSection, classify_narrative, parse_manuscript
 from prose_to_video.pipeline.providers import AISettings, SceneDescription, SceneProvider
 
 
@@ -30,14 +31,13 @@ class AnalysisChunk:
 
 
 def paragraph_starts(text: str) -> list[int]:
+    # Manuscripts may put consecutive paragraphs on separate lines without
+    # blank lines. Keep source whitespace attached to the preceding scene.
     starts = [0]
-    for match in re.finditer(r"(?:\r?\n[ \t]*){2,}", text):
-        next_start = match.end()
-        if next_start < len(text) and text[next_start:].strip():
-            starts.append(next_start)
-    for match in re.finditer(r"(?m)^[ \t]*(?:#{1,6}[ \t]+\S|(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})[^\r\n]*", text):
-        starts.append(match.start())
-    return sorted(set(starts))
+    for line in re.finditer(r"[^\r\n]*(?:\r\n|\n|\r|$)", text):
+        if line.start() and line.group().strip():
+            starts.append(line.start())
+    return starts
 
 
 def make_units(text: str, chunk_chars: int) -> list[Unit]:
@@ -129,64 +129,67 @@ def _description(provider: SceneProvider, text: str, maximum: int, cancel: Event
     )
 
 
+def _scene_prose(text: str, start: int, end: int,
+                 heading_ranges: list[tuple[int, int]]) -> str:
+    """Return scene prose without unspoken heading text."""
+    parts = []
+    position = start
+    for heading_start, heading_end in heading_ranges:
+        if heading_end <= position or heading_start >= end:
+            continue
+        parts.append(text[position:max(position, heading_start)])
+        position = min(end, heading_end)
+    parts.append(text[position:end])
+    return "".join(parts).strip()
+
+
 def detect_scenes(
     text: str, provider: SceneProvider, settings: AISettings,
     cancel: Event | None = None, progress: Callable[[str, int, int], None] | None = None,
+    sections: list[ManuscriptSection] | None = None,
 ) -> list[Scene]:
     settings.validate()
     if not text.strip():
         raise ValueError("The imported prose is empty")
     cancel = cancel or Event()
     progress = progress or (lambda stage, current, total: None)
-    chunks = make_chunks(text, settings.chunk_chars, settings.overlap_chars)
-    all_units = {unit.identifier: unit for chunk in chunks for unit in chunk.units}
-    votes: dict[int, list[bool]] = {}
-    for index, chunk in enumerate(chunks, 1):
-        if cancel.is_set():
-            raise AnalysisCanceled("Scene detection canceled")
-        progress("Finding boundaries", index, len(chunks))
-        labeled = _labeled(text, chunk.units)
-        if len(labeled) > settings.chunk_chars:
-            raise ValueError("Analysis chunk exceeds the configured input size")
-        proposed = provider.propose_boundaries(labeled)
-        valid_ids = {unit.identifier for unit in chunk.units if unit.eligible}
-        if any(identifier not in valid_ids for identifier in proposed.starts):
-            proposed = provider.propose_boundaries(
-                labeled + "\nCorrect the previous answer. Only use eligible IDs shown above.")
-            if any(identifier not in valid_ids for identifier in proposed.starts):
-                raise ValueError(f"AI returned an invalid paragraph ID in chunk {index}")
-        for identifier in valid_ids:
-            votes.setdefault(identifier, []).append(identifier in proposed.starts)
-
-    # Overlapping chunks can disagree about a boundary. Recheck only those
-    # anchors with their surrounding source context, then deterministically
-    # deduplicate all accepted boundaries.
-    disagreements = [identifier for identifier, answers in votes.items() if len(set(answers)) > 1]
-    for index, identifier in enumerate(disagreements, 1):
-        if cancel.is_set():
-            raise AnalysisCanceled("Scene detection canceled")
-        progress("Reconciling boundaries", index, len(disagreements))
-        center = all_units[identifier].start
-        near = tuple(sorted((unit for unit in all_units.values() if
-                     unit.end > center - settings.chunk_chars // 3 and
-                     unit.start < center + settings.chunk_chars // 3), key=lambda unit: unit.start))
-        while len(_labeled(text, near)) > settings.chunk_chars and len(near) > 1:
-            near = near[1:] if center - near[0].start > near[-1].end - center else near[:-1]
-        proposed = provider.propose_boundaries(_labeled(text, near))
-        if any(i not in {u.identifier for u in near if u.eligible} for i in proposed.starts):
-            raise ValueError("AI returned an invalid paragraph ID during reconciliation")
-        votes[identifier] = [identifier in proposed.starts]
-
-    offsets = sorted({0} | {all_units[i].start for i, answers in votes.items() if any(answers)})
-    offsets = [offset for offset in offsets if 0 <= offset < len(text)]
+    sections = sections if sections is not None else parse_manuscript(text)
+    heading_ranges = [(s.heading_start, s.heading_end) for s in sections
+                      if s.heading_start is not None]
+    offsets = [0]
+    pending_heading = None
+    prose_paragraphs = 0
+    for line in re.finditer(r"[^\r\n]*(?:\r\n|\n|\r|$)", text):
+        if not line.group().strip():
+            continue
+        start = line.start()
+        if any(begin <= start < end for begin, end in heading_ranges):
+            if prose_paragraphs and pending_heading is None:
+                pending_heading = start
+            continue
+        if prose_paragraphs:
+            offsets.append(pending_heading if pending_heading is not None else start)
+        prose_paragraphs += 1
+        pending_heading = None
+    if not prose_paragraphs:
+        raise ValueError("The manuscript has no prose paragraphs to turn into scenes")
     scenes = []
     for sequence, (start, end) in enumerate(zip(offsets, offsets[1:] + [len(text)]), 1):
         if cancel.is_set():
             raise AnalysisCanceled("Scene detection canceled")
         progress("Describing scenes", sequence, len(offsets))
-        description = _description(provider, text[start:end], settings.chunk_chars, cancel)
+        applicable = [s for s in sections if s.start < end and s.end > start]
+        included = any(s.included and s.body_start < end and s.end > start for s in applicable)
+        prose = _scene_prose(text, start, end, heading_ranges)
+        if included:
+            description = _description(provider, prose, settings.chunk_chars, cancel)
+            details = description.model_dump()
+        else:
+            details = {"title": "Excluded manuscript material", "boundary_reason": "Production inclusion map"}
+        formats, viewpoint = classify_narrative(prose)
         scenes.append(Scene(sequence=sequence, start=start, end=end, text=text[start:end],
-                            **description.model_dump()))
+                            narrative_formats=formats, viewpoint_category=viewpoint,
+                            production_included=included, **details))
     validate_partition(text, scenes)
     return scenes
 

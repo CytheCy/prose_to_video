@@ -9,7 +9,12 @@ from difflib import SequenceMatcher
 from prose_to_video.models.alignment import (AlignmentIssue, SceneTiming, SpanAlignment,
                                              TextPassage, TranscriptWord, WordAlignment)
 from prose_to_video.models.scene import Scene
-from prose_to_video.utils.prose import WORD_RE
+_MATCH_TOKEN_RE = re.compile(r"\b(?:[A-Za-z]\.){2,}|\b\w+(?:['’]\w+)*\b", re.UNICODE)
+_SPELLED_YEAR_RE = re.compile(r"\btwenty[- ](?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?\b", re.I)
+_YEAR_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+              "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
+_YEAR_ONES = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+              "six": 6, "seven": 7, "eight": 8, "nine": 9}
 
 
 @dataclass(frozen=True)
@@ -24,13 +29,18 @@ _NUMBERS = {"zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
 
 
 def normalize(word: str) -> str:
+    if _SPELLED_YEAR_RE.fullmatch(word):
+        parts = re.split(r"[- ]", word.casefold())
+        return str(2000 + _YEAR_TENS[parts[1]] + (_YEAR_ONES.get(parts[2], 0) if len(parts) > 2 else 0))
     value = word.casefold().replace("’", "'").replace("_", "")
     value = re.sub(r"[^\w']", "", value, flags=re.UNICODE).replace("'", "")
     return _NUMBERS.get(value, value)
 
 
-def manuscript_tokens(text: str) -> list[Token]:
-    return [Token(match.group(), match.start(), match.end()) for match in WORD_RE.finditer(text)]
+def manuscript_tokens(text: str, *, combine_years: bool = False) -> list[Token]:
+    pattern = (re.compile(_SPELLED_YEAR_RE.pattern + "|" + _MATCH_TOKEN_RE.pattern, re.I | re.UNICODE)
+               if combine_years else _MATCH_TOKEN_RE)
+    return [Token(match.group(), match.start(), match.end()) for match in pattern.finditer(text)]
 
 
 def _anchors(a: list[str], b: list[str], size: int = 4) -> list[tuple[int, int]]:
@@ -116,9 +126,14 @@ def _align_gap(a: list[str], b: list[str]) -> list[tuple[int, int]]:
     return result[::-1]
 
 
-def match_words(text: str, spoken: list[TranscriptWord]) -> tuple[list[WordAlignment], list[TextPassage], list[AlignmentIssue]]:
-    source = manuscript_tokens(text)
-    a = [normalize(token.text) for token in source]
+def match_words(text: str, spoken: list[TranscriptWord],
+                included: list[tuple[int, int]] | None = None) -> tuple[list[WordAlignment], list[TextPassage], list[AlignmentIssue]]:
+    source = manuscript_tokens(text, combine_years=any(re.fullmatch(r"(?:19|20|21)\d{2}", normalize(w.text))
+                                                      for w in spoken))
+    eligible = [i for i, token in enumerate(source) if included is None or any(
+        start <= token.start and token.end <= end for start, end in included)]
+    eligible_index = {source_index: filtered_index for filtered_index, source_index in enumerate(eligible)}
+    a = [normalize(source[i].text) for i in eligible]
     b = [normalize(word.text) for word in spoken]
     pairs: dict[int, int] = {}
     anchors = _anchors(a, b)
@@ -133,7 +148,7 @@ def match_words(text: str, spoken: list[TranscriptWord]) -> tuple[list[WordAlign
     words = []
     matched_spoken = set()
     for i, token in enumerate(source):
-        j = pairs.get(i)
+        j = pairs.get(eligible_index[i]) if i in eligible_index else None
         recognized = spoken[j] if j is not None else None
         timed = (recognized is not None and recognized.start is not None
                  and recognized.end > recognized.start)
@@ -143,7 +158,7 @@ def match_words(text: str, spoken: list[TranscriptWord]) -> tuple[list[WordAlign
                                    text=token.text, recognized=recognized.text if recognized else None,
                                    audio_start=recognized.start if timed else None,
                                    audio_end=recognized.end if timed else None,
-                                   status="matched" if timed else "unmatched",
+                                   status="matched" if timed else "excluded" if i not in eligible_index else "unmatched",
                                    confidence=recognized.score if timed else None))
     # Do not allow a later word to point backward in audio after imperfect ASR.
     last = 0.0
@@ -155,7 +170,7 @@ def match_words(text: str, spoken: list[TranscriptWord]) -> tuple[list[WordAlign
             else:
                 last = max(last, word.audio_end)
     passages = []
-    items = sorted(pairs.items())
+    items = sorted((eligible[i], j) for i, j in pairs.items())
     groups: list[list[tuple[int, int]]] = []
     for item in items:
         if not groups or item[0] != groups[-1][-1][0] + 1 or item[1] != groups[-1][-1][1] + 1:
@@ -238,7 +253,7 @@ def sentence_ranges(text: str) -> list[tuple[int, int]]:
 
 
 def span_alignment(start: int, end: int, words: list[WordAlignment]) -> SpanAlignment:
-    included = [w for w in words if start <= w.source_start and w.source_end <= end]
+    included = [w for w in words if w.status != "excluded" and start <= w.source_start and w.source_end <= end]
     aligned = [w for w in included if w.audio_start is not None]
     count = len(aligned)
     coverage = count / len(included) if included else 0.0

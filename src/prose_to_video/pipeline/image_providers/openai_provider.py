@@ -1,23 +1,27 @@
-"""OpenAI Images API adapter. Credentials are read only from the environment."""
+"""OpenAI Images API adapter. Credentials are read at request time."""
 import base64
-import os
 from contextlib import ExitStack
 from pathlib import Path
 from prose_to_video.models.image_job import ImageCapabilities, ImageRequest, ProviderImage, ProviderResult
+from prose_to_video.pipeline.providers import read_api_key
 from .base import ImageProvider, ImageProviderError
 
 
 class OpenAIImageProvider(ImageProvider):
     name = 'OpenAI'
-    def __init__(self, client=None, credential_env='OPENAI_API_KEY'):
+    def __init__(self, client=None, credential_env='OPENAI_API_KEY', credential_file=''):
         self.client = client
         self.credential_env = credential_env
+        self.credential_file = credential_file
 
     def _client(self):
         if self.client is not None: return self.client
-        if not os.getenv(self.credential_env): raise ImageProviderError(f'Set {self.credential_env} before generating images')
+        try:
+            key = read_api_key(self.credential_env, self.credential_file)
+        except ValueError as exc:
+            raise ImageProviderError(str(exc)) from exc
         from openai import OpenAI
-        return OpenAI(api_key=os.environ[self.credential_env], timeout=120, max_retries=0)
+        return OpenAI(api_key=key, timeout=120, max_retries=0)
 
     def test_connection(self):
         self._client().models.list()

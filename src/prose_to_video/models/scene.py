@@ -22,6 +22,9 @@ class Scene(BaseModel):
     characters: list[str] = Field(default_factory=list)
     point_of_view: str | None = None
     narrative_type: str | None = None
+    narrative_formats: list[str] = Field(default_factory=list)
+    viewpoint_category: str = "direct"
+    production_included: bool = True
     summary: str = ""
     environment: str = ""
     important_objects: list[str] = Field(default_factory=list)

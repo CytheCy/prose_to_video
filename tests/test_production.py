@@ -452,7 +452,8 @@ def test_migration_nine_to_ten_preserves_project_and_scenes(tmp_path):
     digest,loaded=session.database.load_scenes()
     assert [s.identifier for s in loaded]==[s.identifier for s in scenes]
     with sqlite3.connect(session.database.path) as con:
-        assert con.execute('PRAGMA user_version').fetchone()[0]==10
+        from prose_to_video.storage.database import SCHEMA_VERSION
+        assert con.execute('PRAGMA user_version').fetchone()[0]==SCHEMA_VERSION
         assert con.execute("SELECT name FROM sqlite_master WHERE name='production_manifest'").fetchone()
 
 def test_known_image_budget_blocks_before_provider_submission(tmp_path):
