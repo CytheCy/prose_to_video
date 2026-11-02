@@ -10,6 +10,9 @@ from prose_to_video.models.image_prompt import (ImagePrompt, PromptComponents, P
     PromptSettings, assemble_prompt, aspect_ratio, fingerprint)
 
 
+from prose_to_video.models.visual_treatment import TECHNICAL_TREATMENTS
+
+
 class PromptDraft(BaseModel):
     model_config = ConfigDict(extra='forbid')
     components: PromptComponents
@@ -85,7 +88,8 @@ def context_for_shot(shot, scene, board, library, project, settings, *, legacy=F
         # Following shot is a continuity constraint only. Never depict its later action.
         'following_shot': {'environment': following.environment} if following else None,
         'entities': [{k: v for k, v in e.items() if k != 'references'} for e in entities],
-        'style': style, 'aspect_ratio': ratio, 'settings': settings.model_dump()}
+        'style': style, 'aspect_ratio': ratio, 'settings': settings.model_dump(),
+        'treatment_instruction': TECHNICAL_TREATMENTS.get(shot.visual_treatment, '')}
     deps = {'shot': image_shot, 'scene': payload['scene'],
             'previous_shot': payload['previous_shot'], 'following_shot': payload['following_shot'],
             'entities': visual['entities'], 'shot_references': visual['shot_references'],
@@ -133,6 +137,8 @@ def generate_prompt(shot, scene, board, library, project, settings: PromptSettin
         if any(value and value.casefold() not in existing.casefold() for value in details):
             warnings.append(f"Review generated {entity['name']} description against approved appearance")
         setattr(components, target, f'{existing} {approved}'.strip())
+    if shot.visual_treatment in TECHNICAL_TREATMENTS:
+        components.composition = TECHNICAL_TREATMENTS[shot.visual_treatment] + ' ' + components.composition
     positive = assemble_prompt(components)
     warnings += draft.warnings
     return ImagePrompt(shot_id=shot.identifier, scene_id=scene.identifier, version=version,

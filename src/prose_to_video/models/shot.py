@@ -6,6 +6,7 @@ import json
 import math
 from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from prose_to_video.models.visual_treatment import VISUAL_TREATMENTS
 
 
 class ViewpointContext(BaseModel):
@@ -124,7 +125,7 @@ class Shot(BaseModel):
             raise ValueError("Unknown shot type or camera movement")
         if self.review_status not in STATUSES or self.timing_status not in TIMING_STATUSES:
             raise ValueError("Invalid shot status")
-        if self.visual_treatment not in {"literal", "establishing", "illustrative", "montage", "screen", "symbolic"}:
+        if self.visual_treatment not in VISUAL_TREATMENTS:
             raise ValueError("Invalid visual treatment")
         if any(value not in {"source", "approved_reference", "inferred", "proposed", "uncertain"}
                for value in self.fact_provenance.values()):

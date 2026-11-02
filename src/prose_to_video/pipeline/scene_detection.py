@@ -100,12 +100,18 @@ def _labeled(text: str, units: tuple[Unit, ...]) -> str:
     return "\n".join(f"[ID {u.identifier}; {'eligible' if u.eligible else 'context only'}] {text[u.start:u.end]}" for u in units)
 
 
-def _description(provider: SceneProvider, text: str, maximum: int, cancel: Event) -> SceneDescription:
+def _description(provider: SceneProvider, text: str, maximum: int, cancel: Event,
+                 previous_context: str = "", context_limit: int = 1500) -> SceneDescription:
     parts = []
-    for start in range(0, len(text), maximum):
+    contextual = getattr(provider, "describe_scene_with_context", None)
+    context_limit = min(context_limit, maximum // 4) if contextual else 0
+    step = maximum - context_limit
+    for start in range(0, len(text), step):
         if cancel.is_set():
             raise AnalysisCanceled("Scene detection canceled")
-        parts.append(provider.describe_scene(text[start:start + maximum]))
+        passage = text[start:start + step]
+        context = (previous_context + "\n" + text[:start])[-context_limit:].strip() if context_limit else ""
+        parts.append(contextual(passage, context) if contextual else provider.describe_scene(passage))
     if len(parts) == 1:
         return parts[0]
 
@@ -182,7 +188,13 @@ def detect_scenes(
         included = any(s.included and s.body_start < end and s.end > start for s in applicable)
         prose = _scene_prose(text, start, end, heading_ranges)
         if included:
-            description = _description(provider, prose, settings.chunk_chars, cancel)
+            # Stay within the current included section: headings and editorial material
+            # are never pronoun evidence. The preceding text cannot change source offsets.
+            section = next((s for s in applicable if s.included and s.body_start < end and s.end > start), None)
+            context_start = max(section.body_start, start - settings.overlap_chars) if section else start
+            previous_context = _scene_prose(text, context_start, start, heading_ranges) if context_start < start else ""
+            description = _description(provider, prose, settings.chunk_chars, cancel,
+                                       previous_context, settings.overlap_chars)
             details = description.model_dump()
         else:
             details = {"title": "Excluded manuscript material", "boundary_reason": "Production inclusion map"}

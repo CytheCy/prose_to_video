@@ -271,3 +271,37 @@ def test_exports(tmp_path: Path) -> None:
     assert data["scenes"][0]["text"] == scenes[0].text
     assert "## Scene 2: Station" in markdown_path.read_text(encoding="utf-8")
     assert TEXT[scenes[1].start:scenes[1].end] in markdown_path.read_text(encoding="utf-8")
+
+
+def test_preceding_context_is_bounded_section_local_and_not_source():
+    class ContextProvider(MockProvider):
+        def __init__(self): self.received = []
+        def describe_scene_with_context(self, source, previous):
+            self.received.append((source, previous))
+            result = super().describe_scene(source)
+            result.characters = ['Ada'] if 'Ada' in source + previous else []
+            return result
+    text = '# One\nAda arrives.\nShe sits.\n# Two\nShe leaves.\n'
+    provider = ContextProvider()
+    scenes = detect_scenes(text, provider, AISettings())
+    assert provider.received[1] == ('She sits.', 'Ada arrives.')
+    assert provider.received[2] == ('She leaves.', '')
+    assert scenes[1].characters == ['Ada']
+    assert ''.join(s.text for s in scenes) == text
+    long_text = 'Ada waits.\n' + 'She thinks. ' * 300
+    provider = ContextProvider()
+    detect_scenes(long_text, provider, AISettings(chunk_chars=1000, overlap_chars=200))
+    assert all(len(source) + len(context) <= 1000 for source, context in provider.received)
+    assert all(len(context) <= 200 for _, context in provider.received)
+
+
+def test_context_provider_instructions_separate_source(monkeypatch):
+    import json
+    from unittest.mock import Mock
+    monkeypatch.setenv('TEST_SCENE_KEY', 'placeholder')
+    provider = OpenAIProvider(AISettings(credential_env='TEST_SCENE_KEY'))
+    provider._request = Mock(return_value=MockProvider().describe_scene('Ada waits.'))
+    provider.describe_scene_with_context('She sits.', 'Ada arrives.')
+    instruction, payload, schema = provider._request.call_args.args
+    assert json.loads(payload) == {'source_prose': 'She sits.', 'previous_context': 'Ada arrives.'}
+    assert 'pronoun resolution ONLY' in instruction

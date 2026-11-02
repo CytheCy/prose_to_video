@@ -312,3 +312,22 @@ def test_character_aliases_and_appearance_continuity():
     assert "Review appearance continuity" in board.shots[1].ai_notes
     assert "character:jeffrey" in board.shots[1].entity_refs
     assert "prop:key" in board.shots[1].entity_refs
+
+
+def test_planner_accepts_technical_views_and_editor_exposes_them():
+    from prose_to_video.gui.storyboard_panel import StoryboardPanel
+    from prose_to_video.models.visual_treatment import TECHNICAL_TREATMENTS
+    class TechnicalProvider:
+        def propose_shots(self, payload):
+            data = json.loads(payload)
+            assert 'Choose semantically' in data['instruction']
+            return ShotIdeas(shots=[ShotIdea(start_id=0, title='System layout',
+                visual_description='Source-supported components', visual_treatment='blueprint')])
+    scene, _ = fixture_data()
+    board = plan_scene(scene, TEXT, StoryboardSettings(), TechnicalProvider())
+    assert board.shots[0].visual_treatment == 'blueprint'
+    app = QApplication.instance() or QApplication([])
+    panel = StoryboardPanel()
+    options = {panel.visual_treatment.itemText(i) for i in range(panel.visual_treatment.count())}
+    assert set(TECHNICAL_TREATMENTS) <= options
+    panel.close()

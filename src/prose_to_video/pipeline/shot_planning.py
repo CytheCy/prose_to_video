@@ -9,6 +9,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from prose_to_video.models.scene import Scene, source_hash
+from prose_to_video.models.visual_treatment import VisualTreatment, TECHNICAL_PLANNING
 from prose_to_video.models.alignment import AlignmentRun
 from prose_to_video.models.shot import Shot, Storyboard, StoryboardSettings, ViewpointContext
 from prose_to_video.pipeline.text_matching import sentence_ranges
@@ -42,7 +43,7 @@ class ShotIdea(BaseModel):
     suggested_motion: str = "None"
     ai_notes: str = ""
     viewpoint: ViewpointContext | None = None
-    visual_treatment: Literal["literal", "establishing", "illustrative", "montage", "screen", "symbolic"] | None = None
+    visual_treatment: VisualTreatment | None = None
     fact_provenance: dict[str, Literal["source", "approved_reference", "inferred", "proposed", "uncertain"]] = Field(default_factory=dict)
     entity_refs: list[str] = Field(default_factory=list)
 
@@ -112,7 +113,7 @@ def plan_scene(scene: Scene, manuscript: str, settings: StoryboardSettings, prov
         payload = json.dumps({"scene": scene.model_dump(exclude={"text"}), "context": context[-1200:],
                               "settings": settings.model_dump(), "target_seconds": target_range_for_scene(scene, settings),
                               "sentences": labeled, "valid_ids": indices,
-                              "instruction": "Choose meaningful visual changes. Include ID 0 for the first chunk. Do not force cuts at sentence, speaker, or chunk edges. Preserve chronology and age variants. For radio, television, surveillance, drone, recorded footage and video calls, keep the observer's physical location separate from remote content. Use an explicit viewpoint; label external or illustrative views. Do not present memories as current events or proposed details as source facts. Use montage or explanatory views for exposition. Do not provide timestamps."}, ensure_ascii=False)
+                              "instruction": TECHNICAL_PLANNING + "Choose meaningful visual changes. Include ID 0 for the first chunk. Do not force cuts at sentence, speaker, or chunk edges. Preserve chronology and age variants. For radio, television, surveillance, drone, recorded footage and video calls, keep the observer's physical location separate from remote content. Use an explicit viewpoint; label external or illustrative views. Do not present memories as current events or proposed details as source facts. Use montage or explanatory views for exposition. Do not provide timestamps."}, ensure_ascii=False)
         try:
             response = provider.propose_shots(payload)
             response = ShotIdeas.model_validate(response)

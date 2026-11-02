@@ -165,7 +165,8 @@ class ImageGenerator:
         cap=self.store.settings().spending_cap
         if cap is None: return
         jobs=self.store.jobs()
-        total=0.0
+        from prose_to_video.pipeline.character_references import reference_spending
+        total=reference_spending(VisualLibrary(self.session.root))
         for item in jobs:
             if item.identifier==job.identifier or item.status in {'Canceled','Failed'}: continue
             amount=item.actual_cost if item.actual_cost is not None else item.estimated_cost

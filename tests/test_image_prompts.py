@@ -284,3 +284,17 @@ def test_shot_change_invalidates_only_its_prompt(tmp_path):
     store.save_settings(PromptSettings(detail_level='Highly detailed'))
     assert 'Prompt generation settings changed' in store.validate(
         prompts[1],scene,changed_board.shots[1],changed_board,session.project,library)
+
+
+@pytest.mark.parametrize('treatment', ['concept_map', 'blueprint', 'cad_visualization', 'product_showcase'])
+def test_technical_treatment_survives_model_omission_and_storage(tmp_path, treatment):
+    from prose_to_video.models.visual_treatment import TECHNICAL_TREATMENTS
+    session, scene, board, library, _ = setup(tmp_path)
+    shot = board.shots[0]
+    shot.visual_treatment = treatment
+    session.database.save_storyboard(board, scene.text)
+    assert session.database.load_storyboard(scene.identifier).shots[0].visual_treatment == treatment
+    fake = FakeProvider()
+    prompt = generate_prompt(shot, scene, board, library, session.project, PromptSettings(), fake)
+    assert fake.payloads[0]['treatment_instruction'] == TECHNICAL_TREATMENTS[treatment]
+    assert TECHNICAL_TREATMENTS[treatment] in prompt.positive_prompt

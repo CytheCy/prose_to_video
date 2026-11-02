@@ -504,6 +504,8 @@ class MainWindow(QMainWindow):
         self.image_gallery_panel.details_requested.connect(self._image_details)
         self.image_gallery_panel.compare_requested.connect(self._compare_images)
         self.image_gallery_panel.recovery_requested.connect(self._recover_image_jobs)
+        self.visual_library_panel.prepare_references_requested.connect(self._prepare_character_references)
+        self.visual_library_panel.generate_reference_requested.connect(self._generate_character_reference)
         self.visual_library_panel.extract_requested.connect(self._extract_entities)
         self.visual_library_panel.cancel_requested.connect(self._cancel_entity_extraction)
         self.visual_library_panel.changed.connect(self._visuals_changed)
@@ -578,6 +580,8 @@ class MainWindow(QMainWindow):
             action.setEnabled(session is not None and not busy)
         self.import_prose_button.setEnabled(session is not None and not busy)
         self.import_audio_button.setEnabled(session is not None and not busy)
+        self.visual_library_panel.prepare_references_button.setEnabled(session is not None and not busy)
+        self.visual_library_panel.generate_reference_button.setEnabled(session is not None and not busy)
         prose_available = bool(session and session.file_status()[0])
         audio_available = bool(session and session.file_status()[1])
         self.scenes_panel.set_state(prose_available and self._task is None,
@@ -1465,6 +1469,61 @@ class MainWindow(QMainWindow):
             VisualLibrary(self.session.root).save_style_override(scope, target.identifier, style)
             self.statusBar().showMessage(f'Visual style override saved for {scope}', 5000)
         except (ValueError, ProjectDatabaseError) as exc: self._show_error('Visual style', str(exc))
+
+    def _prepare_character_references(self):
+        if not self.session or self._task or self._entity_task: return
+        from prose_to_video.pipeline.character_references import prepare_character_references
+        library = VisualLibrary(self.session.root)
+        self._start_task(lambda: prepare_character_references(library),
+                         lambda records: self._character_references_ready(f'{len(records)} character reference prompts prepared'),
+                         'Character references')
+
+    def _character_references_ready(self, message):
+        self.visual_library_panel.refresh()
+        self.visual_library_panel.status.setText(message)
+        self._visuals_changed()
+
+    def _generate_character_reference(self, identifier):
+        if not self.session or self._task or self._entity_task or self._image_task: return
+        from prose_to_video.pipeline.character_references import (ReferenceStore, generate_character_reference,
+                                                                 reconcile_character_reference)
+        from prose_to_video.models.image_job import ImageGenerationSettings
+        library = VisualLibrary(self.session.root)
+        record = next((r for r in ReferenceStore(library).records() if r['identifier'] == identifier), None)
+        if not record: return
+        try:
+            settings = ImageStore(self.session.root).settings()
+            if record['status'] in {'Submitted', 'Needs Reconciliation'}:
+                settings = ImageGenerationSettings.model_validate(record['settings'])
+                provider = make_image_provider(settings, self.session.root)
+                self._start_task(lambda: reconcile_character_reference(library, identifier, provider),
+                    lambda result: self._character_references_ready('Reference request: ' + result['status']),
+                    'Character reference reconciliation')
+                return
+            dialog = QDialog(self); dialog.setWindowTitle(record['label']); dialog.resize(720, 600)
+            layout = QVBoxLayout(dialog)
+            note = QLabel('\n'.join(record['warnings']) or 'Review the appearance and style before generation.')
+            note.setWordWrap(True); layout.addWidget(note)
+            editor = QPlainTextEdit(record['prompt']); layout.addWidget(editor)
+            if record['status'] != 'Prepared':
+                editor.setReadOnly(True)
+                layout.addWidget(QLabel('Generated candidates are in Reference images for review and approval.'))
+                buttons = QDialogButtonBox(QDialogButtonBox.Close)
+                buttons.rejected.connect(dialog.reject); layout.addWidget(buttons); dialog.exec(); return
+            cost = (f'Estimated cost: {settings.estimated_cost_per_image:g}' if settings.estimated_cost_per_image is not None
+                    else 'Cost estimate unavailable')
+            layout.addWidget(QLabel(f'Generate one image using {settings.provider} / {settings.model}. {cost}.'))
+            buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+            generate = buttons.addButton('Generate Reference', QDialogButtonBox.AcceptRole)
+            buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); layout.addWidget(buttons)
+            if dialog.exec() != QDialog.Accepted: return
+            prompt = editor.toPlainText()
+            provider = make_image_provider(settings, self.session.root)
+            self._start_task(lambda: generate_character_reference(library, identifier, settings, provider, prompt=prompt),
+                lambda result: self._character_references_ready('Reference request: ' + result['status'] + '; review candidates before approval'),
+                'Character reference generation')
+        except Exception as exc:
+            self._show_error('Character references', str(exc))
 
     def _extract_entities(self, scope: str):
         if not self.session or self._entity_task: return

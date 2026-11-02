@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QGridLayout, Q
     QLineEdit, QListWidget, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget)
 from prose_to_video.models.shot import CAMERA_MOVEMENTS, SHOT_TYPES, Storyboard, Shot, ViewpointContext
 from prose_to_video.pipeline.manuscript import VIEWPOINTS
+from prose_to_video.models.visual_treatment import VISUAL_TREATMENTS
 from prose_to_video.utils.media_info import format_duration
 
 class ShotTimeline(QWidget):
@@ -117,7 +118,7 @@ class StoryboardPanel(QGroupBox):
         self.shot_type = QComboBox(); self.shot_type.addItems(SHOT_TYPES)
         self.camera_movement = QComboBox(); self.camera_movement.addItems(CAMERA_MOVEMENTS)
         self.review_status = QComboBox(); self.review_status.addItems(("Not reviewed", "Reviewed", "Manually edited"))
-        self.visual_treatment = QComboBox(); self.visual_treatment.addItems(("literal", "establishing", "illustrative", "montage", "screen", "symbolic"))
+        self.visual_treatment = QComboBox(); self.visual_treatment.addItems(VISUAL_TREATMENTS)
         self.viewpoint_category = QComboBox(); self.viewpoint_category.addItems(VIEWPOINTS)
         self.physical_location = QLineEdit(); self.depicted_location = QLineEdit()
         self.media_source = QLineEdit()

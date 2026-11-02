@@ -99,6 +99,8 @@ def extract_entities(scenes: list[Scene], library: VisualLibrary, provider: Enti
             _save_chunk(proposals, scene, chunk_start, chunk_text, library, manuscript_hash, created)
         reconcile_shot_links(scene, library)
         if progress: progress(index, len(chosen))
+    from prose_to_video.pipeline.character_references import prepare_character_references
+    prepare_character_references(library)
     return created
 
 def _save_chunk(proposals, scene, chunk_start, chunk_text, library, manuscript_hash, created):

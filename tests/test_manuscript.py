@@ -1,5 +1,6 @@
 """Source-grounded manuscript regression checks; no live AI or media service."""
 from __future__ import annotations
+from prose_to_video.storage.database import SCHEMA_VERSION
 
 import os
 import sqlite3
@@ -190,7 +191,7 @@ def test_migrate_ten_to_eleven_preserves_project(tmp_path):
     text = "# Story\nA complete scene."
     assert store.sections(text)[0].included
     with sqlite3.connect(session.database.path) as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_nested_location_identity_and_cycle_guard(tmp_path):

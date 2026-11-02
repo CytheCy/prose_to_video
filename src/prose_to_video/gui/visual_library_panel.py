@@ -32,6 +32,8 @@ class IntegrityTask(QThread):
         except Exception as exc: self.succeeded.emit([str(exc)])
 
 class VisualLibraryPanel(QWidget):
+    prepare_references_requested = Signal()
+    generate_reference_requested = Signal(str)
     extract_requested = Signal(str)
     cancel_requested = Signal()
     changed = Signal()
@@ -69,6 +71,7 @@ class VisualLibraryPanel(QWidget):
                               ('Parent location', self.parent_location),
                               ('Spatial relationship', self.spatial_relationship)]: form.addRow(label, widget)
         self.scene_links = QListWidget(); self.shot_links = QListWidget()
+        self.reference_prompts = QListWidget()
         self.evidence = QListWidget(); self.variants = QListWidget(); self.gallery = QListWidget()
         self.gallery.setIconSize(QSize(72, 72))
         self.preview = QLabel('Select a reference image'); self.preview.setAlignment(Qt.AlignCenter)
@@ -112,6 +115,14 @@ class VisualLibraryPanel(QWidget):
         right_layout.addWidget(QLabel('Source evidence (double-click to approve or reject)')); right_layout.addWidget(self.evidence)
         right_layout.addWidget(QLabel('Appearance variants')); right_layout.addWidget(self.variants)
         variant_button = QPushButton('Add Variant'); variant_button.clicked.connect(self.add_variant); right_layout.addWidget(variant_button)
+        right_layout.addWidget(QLabel('Prepared character references'))
+        right_layout.addWidget(self.reference_prompts)
+        prepare = self.prepare_references_button = QPushButton('Prepare Character References')
+        prepare.clicked.connect(self.prepare_references_requested.emit)
+        right_layout.addWidget(prepare)
+        generate = self.generate_reference_button = QPushButton('Review / Generate Reference…')
+        generate.clicked.connect(self._generate_reference)
+        right_layout.addWidget(generate)
         right_layout.addWidget(QLabel('Reference images')); right_layout.addWidget(self.gallery)
         right_layout.addWidget(self.preview)
         ref_form = QFormLayout(); ref_form.addRow('Role', self.role); ref_form.addRow('Description', self.reference_description)
@@ -221,7 +232,13 @@ class VisualLibraryPanel(QWidget):
     def _load_related(self):
         self.scene_links.clear(); self.shot_links.clear(); self.evidence.clear(); self.variants.clear(); self.gallery.clear()
         self.preview.clear()
+        self.reference_prompts.clear()
         if not self.library or not self.current_id: return
+        from prose_to_video.pipeline.character_references import ReferenceStore
+        for record in ReferenceStore(self.library).records(self.current_id):
+            self.reference_prompts.addItem(f"{record['label']} [{record['status']}]")
+            self.reference_prompts.item(self.reference_prompts.count()-1).setData(Qt.UserRole, record['identifier'])
+        if self.reference_prompts.count(): self.reference_prompts.setCurrentRow(self.reference_prompts.count()-1)
         db = self.library.db
         scenes = {s.identifier: s for s in db.load_scenes()[1]}
         for scene_id in self.library.scenes_for(self.current_id):
@@ -250,6 +267,10 @@ class VisualLibraryPanel(QWidget):
             if thumb.is_file(): item.setIcon(QIcon(str(thumb)))
         if self.gallery.count(): self.gallery.setCurrentRow(0)
         self.status.setText(f'{self.library.entity(self.current_id).name} · {len(self.library.shots_for(self.current_id))} affected shots')
+
+    def _generate_reference(self):
+        item = self.reference_prompts.currentItem()
+        if item: self.generate_reference_requested.emit(item.data(Qt.UserRole))
 
     def _selected_reference(self):
         item = self.gallery.currentItem()

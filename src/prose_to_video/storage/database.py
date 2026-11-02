@@ -16,7 +16,7 @@ from prose_to_video.models.shot import Storyboard, StoryboardSettings
 from prose_to_video.pipeline.shot_planning import scene_definition_hash
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 MIGRATIONS = {
     1: """
         CREATE TABLE project (
@@ -243,6 +243,11 @@ MIGRATIONS = {
             review INTEGER NOT NULL, PRIMARY KEY(source_hash, section_id));
     """,
 
+    12: """
+        CREATE TABLE IF NOT EXISTS character_reference_preparation (
+            identifier TEXT PRIMARY KEY, entity_id TEXT NOT NULL,
+            data_json TEXT NOT NULL);
+    """,
 }
 
 

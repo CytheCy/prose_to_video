@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -135,14 +136,20 @@ class OpenAIProvider:
         )
 
     def describe_scene(self, scene_text: str) -> SceneDescription:
+        return self.describe_scene_with_context(scene_text, "")
+
+    def describe_scene_with_context(self, scene_text: str, previous_context: str) -> SceneDescription:
         return self._request(
-            "Extract factual scene information from the provided prose. Narrative type may be "
+            "Extract factual scene information ONLY from source_prose. previous_context is for "
+            "pronoun resolution ONLY: resolve he/she/they to a named character only when unambiguous; "
+            "never use a pronoun as a character name. Do not extract events or appearances from context, "
+            "and leave ambiguous identity unspecified. Narrative type may be "
             "action, dialogue, exposition, news report, flashback, or another supported category. "
             "Explain the boundary only if the prose supports it. Use a concise summary, "
             "detailed grounded environment and actions. Do not invent appearance, setting, "
             "time of day, or events. Use null for unknown optional fields and empty lists/strings "
             "for unknown descriptive fields. Give a short useful title.",
-            scene_text, SceneDescription,
+            json.dumps({"source_prose": scene_text, "previous_context": previous_context}, ensure_ascii=False), SceneDescription,
         )
 
     def extract_entities(self, payload: str):
@@ -186,6 +193,8 @@ class OpenAIProvider:
             "actions, materials, light, and composition concretely where supported. Do not invent "
             "major actions or characters. Keep uncertain facts unspecified and flag conflicts in "
             "warnings. Reference-image metadata is context only; no image binaries are supplied. "
+            "Follow treatment_instruction and the shot visual_treatment as composition constraints, "
+            "while preserving approved style and viewpoint. Do not add invented measurements or labels. "
             "Do not use proprietary image-model syntax. Negative prompt is optional.",
             payload, PromptDraft)
 
