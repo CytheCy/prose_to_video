@@ -189,3 +189,51 @@ def test_scene_selection_highlights_exact_source_range(tmp_path: Path) -> None:
     application.processEvents()
     assert window.scenes_panel.outdated
     window.close()
+
+
+def test_places_tab_detects_shared_settings_and_opens_scene(tmp_path: Path, monkeypatch) -> None:
+    import prose_to_video.gui.main_window as main_window
+    from prose_to_video.pipeline.place_detection import PlaceProposal, PlaceProposals, PlaceDescription
+    class PlaceProvider:
+        def detect_places(self, payload):
+            return PlaceProposals(places=[PlaceProposal(name='Industrial Area',
+                description='A district of factories.', passage_ids=[1])])
+        def describe_place(self, payload):
+            return PlaceDescription(description='A district of factories.')
+    monkeypatch.setattr(main_window, 'make_provider', lambda settings: PlaceProvider())
+    application = QApplication.instance() or QApplication([])
+    source = tmp_path / 'places.txt'
+    source.write_text('Arrival.Return.', encoding='utf-8')
+    session = import_prose(create_project(tmp_path, 'Places'), source)
+    scenes = [
+        Scene(sequence=1, start=0, end=8, text='Arrival.', title='Arrival',
+              location='Industrial Area', environment='A district of factories.'),
+        Scene(sequence=2, start=8, end=15, text='Return.', title='Return',
+              location='Industrial Area'),
+    ]
+    session.database.replace_scenes(source.read_text(), scenes)
+    window = MainWindow()
+    window._set_session(session)
+    deadline = time.monotonic() + 5
+    while (window._task is not None or not window._prose_ready) and time.monotonic() < deadline:
+        application.processEvents()
+        time.sleep(.01)
+    window._detect_places()
+    deadline = time.monotonic() + 5
+    while window._task is not None and time.monotonic() < deadline:
+        application.processEvents()
+        time.sleep(.01)
+    assert window.workspace_tabs.tabText(0) == 'Start'
+    assert window.workspace_tabs.tabText(1) == 'Places'
+    assert window.workspace_tabs.tabText(2) == 'Characters'
+    assert window.workspace_tabs.tabText(3) == 'Scenes'
+    panel = window.places_panel
+    assert panel.list_widget.count() == 1
+    assert panel.scene_list.count() == 2
+    assert panel.description_edit.toPlainText() == 'A district of factories.'
+    window.workspace_tabs.setCurrentWidget(panel)
+    panel.scene_list.setCurrentRow(1)
+    panel.open_button.click()
+    assert window.workspace_tabs.currentWidget() is window.scenes_panel
+    assert window.scenes_panel.current_scene().identifier == scenes[1].identifier
+    window.close()

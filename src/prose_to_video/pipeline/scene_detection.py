@@ -1,4 +1,4 @@
-"""Paragraph-based scenes with source-owned offsets and complete partition checks."""
+"""AI location/time scene boundaries with exact source partition checks."""
 
 from __future__ import annotations
 
@@ -179,6 +179,24 @@ def detect_scenes(
         pending_heading = None
     if not prose_paragraphs:
         raise ValueError("The manuscript has no prose paragraphs to turn into scenes")
+    candidates = set(offsets)
+    selected = {0, *(s.start for s in sections if s.start in candidates)}
+    chunks = make_chunks(text, settings.chunk_chars, settings.overlap_chars)
+    for number, chunk in enumerate(chunks, 1):
+        if cancel.is_set():
+            raise AnalysisCanceled("Scene detection canceled")
+        progress("Detecting location and time changes", number, len(chunks))
+        proposal = provider.propose_boundaries(_labeled(text, chunk.units))
+        units = {u.identifier: u for u in chunk.units}
+        for identifier in proposal.starts:
+            if identifier not in units or not units[identifier].eligible:
+                raise ValueError("AI returned an invalid scene boundary ID")
+            unit = units[identifier]
+            if identifier in chunk.core_ids:
+                # A heading remains attached to its first prose paragraph.
+                boundary = max(offset for offset in candidates if offset <= unit.start)
+                selected.add(boundary)
+    offsets = sorted(selected)
     scenes = []
     for sequence, (start, end) in enumerate(zip(offsets, offsets[1:] + [len(text)]), 1):
         if cancel.is_set():

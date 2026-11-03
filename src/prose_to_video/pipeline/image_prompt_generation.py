@@ -73,7 +73,13 @@ def context_for_shot(shot, scene, board, library, project, settings, *, legacy=F
     image_shot = shot.model_dump(mode='json') if legacy else shot.model_dump(mode='json', exclude={
         'camera_movement', 'suggested_motion', 'transition', 'audio_start', 'audio_end',
         'timing_status', 'timing_note', 'review_status', 'manually_edited'})
-    payload = {'shot': image_shot, 'source_prose': shot.original_prose,
+    from prose_to_video.pipeline.place_detection import listed_places
+    scene_digest = library.db.load_scenes()[0]
+    places = [{'id': p.identifier, 'name': p.name, 'description': p.description}
+              for p in listed_places(library) if p.source_hash == scene_digest
+              and scene.identifier in library.scenes_for(p.identifier)
+              and any(start < shot.source_end and end > shot.source_start for start, end in p.place_ranges)]
+    payload = {'places': places, 'shot': image_shot, 'source_prose': shot.original_prose,
         'surrounding_prose': scene.text[max(0, shot.source_start-scene.start-400):shot.source_end-scene.start],
         'scene': {'title': scene.title, 'location': scene.location,
                   'narrative_formats': scene.narrative_formats,
@@ -90,7 +96,7 @@ def context_for_shot(shot, scene, board, library, project, settings, *, legacy=F
         'entities': [{k: v for k, v in e.items() if k != 'references'} for e in entities],
         'style': style, 'aspect_ratio': ratio, 'settings': settings.model_dump(),
         'treatment_instruction': TECHNICAL_TREATMENTS.get(shot.visual_treatment, '')}
-    deps = {'shot': image_shot, 'scene': payload['scene'],
+    deps = {'places': places, 'shot': image_shot, 'scene': payload['scene'],
             'previous_shot': payload['previous_shot'], 'following_shot': payload['following_shot'],
             'entities': visual['entities'], 'shot_references': visual['shot_references'],
             'style': style, 'ratio': ratio, 'settings': settings.model_dump()}

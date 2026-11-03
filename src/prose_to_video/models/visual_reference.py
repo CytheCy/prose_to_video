@@ -55,6 +55,11 @@ class VisualEntity(BaseModel):
     review_status: str = 'Suggested'
     user_notes: str = ''
     source_hash: str | None = None
+    character_edited_fields: list[str] = Field(default_factory=list)
+    character_paragraphs: list[int] = Field(default_factory=list)
+    place_order: int | None = Field(default=None, ge=1)
+    place_ranges: list[tuple[int, int]] = Field(default_factory=list)
+    place_description_edited: bool = False
     parent_entity_id: str | None = None
     spatial_relationship: str = ""
     created_at: datetime = Field(default_factory=now)

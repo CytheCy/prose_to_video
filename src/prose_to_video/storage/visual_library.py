@@ -82,7 +82,9 @@ class VisualLibrary:
             if old:
                 entity.created_at = previous.created_at
                 entity.modified_at = now()
-            con.execute('INSERT OR REPLACE INTO visual_entity VALUES(?,?,?,?,?,?)',
+            con.execute('INSERT INTO visual_entity VALUES(?,?,?,?,?,?) ON CONFLICT(identifier) DO UPDATE SET '
+                        'name=excluded.name, entity_type=excluded.entity_type, status=excluded.status, '
+                        'recurring=excluded.recurring, data_json=excluded.data_json',
                         (entity.identifier, entity.name, entity.entity_type, entity.review_status,
                          int(entity.recurring), entity.model_dump_json()))
             con.execute('DELETE FROM entity_alias WHERE entity_id=?', (entity.identifier,))

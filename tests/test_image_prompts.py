@@ -298,3 +298,22 @@ def test_technical_treatment_survives_model_omission_and_storage(tmp_path, treat
     prompt = generate_prompt(shot, scene, board, library, session.project, PromptSettings(), fake)
     assert fake.payloads[0]['treatment_instruction'] == TECHNICAL_TREATMENTS[treatment]
     assert TECHNICAL_TREATMENTS[treatment] in prompt.positive_prompt
+
+
+def test_place_descriptions_inform_prompts_and_invalidate_after_edits(tmp_path):
+    from prose_to_video.pipeline.image_prompt_generation import context_for_shot
+    from prose_to_video.pipeline.place_detection import link_places
+    session, scene, board, library, _ = setup(tmp_path)
+    place = library.save_entity(VisualEntity(name='The Shoe Factory', entity_type='Location',
+        description='Brick walls and leather racks; the machine room has iron equipment.',
+        place_order=1, place_ranges=[(scene.start, scene.end)], source_hash=source_hash(scene.text)))
+    link_places(library)
+    def context():
+        return context_for_shot(board.shots[0], scene, board, library, session.project, PromptSettings())
+    payload, *_, before = context()
+    assert payload['places'][0]['name'] == 'The Shoe Factory'
+    assert 'leather racks' in payload['places'][0]['description']
+    library.save_entity(place.model_copy(update={'description': 'Revised brick factory.'}))
+    payload, *_, after = context()
+    assert before != after
+    assert payload['places'][0]['description'] == 'Revised brick factory.'

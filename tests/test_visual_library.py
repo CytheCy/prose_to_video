@@ -343,7 +343,8 @@ def test_gui_mock_extraction_and_storyboard_reference(tmp_path, monkeypatch):
         app.processEvents(); time.sleep(.01)
     assert window._entity_task is None
     assert window.visual_library_panel.entities.count() == 1
-    assert window.workspace_tabs.tabText(2) == 'Visual Library'
+    assert window.workspace_tabs.tabText(1) == 'Places'
+    assert window.workspace_tabs.tabText(5) == 'Visual Library'
     window.close()
 
 

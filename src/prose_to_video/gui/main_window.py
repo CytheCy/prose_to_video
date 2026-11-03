@@ -32,6 +32,11 @@ from prose_to_video.gui.image_gallery_panel import ImageGalleryPanel
 from prose_to_video.gui.image_generation_settings import ImageGenerationSettingsDialog
 from prose_to_video.gui.image_prompt_settings import PromptSettingsDialog
 from prose_to_video.gui.visual_library_panel import VisualLibraryPanel
+from prose_to_video.gui.characters_panel import CharactersPanel
+from prose_to_video.pipeline.character_detection import detect_characters
+from prose_to_video.models.visual_reference import EntityReference
+from prose_to_video.gui.places_panel import PlacesPanel
+from prose_to_video.pipeline.place_detection import detect_places, link_places, PlacesCanceled
 from prose_to_video.gui.storyboard_settings import StoryboardSettingsDialog
 from prose_to_video.gui.video_production import VideoProductionPanel, RenderSettingsDialog, RenderTask
 from prose_to_video.gui.animation_panel import AnimationPanel
@@ -94,6 +99,44 @@ class FileTask(QThread):
         except Exception as exc:
             LOGGER.exception("Unexpected background task failure")
             self.failed.emit(f"Operation failed: {exc}")
+
+
+class PlaceTask(FileTask):
+    progress = Signal(str)
+
+    def __init__(self, path, library, provider, settings, parent=None):
+        self.cancel_event = Event()
+        def work():
+            text = read_prose(path)
+            def check():
+                if source_hash(read_prose(path)) != source_hash(text):
+                    raise ValueError('Prose changed during place detection; run detection again')
+            return detect_places(text, library, provider, settings, cancel=self.cancel_event,
+                                 progress=self.progress.emit, source_check=check)
+        super().__init__(work, parent)
+
+    def run(self):
+        try:
+            self.succeeded.emit(self.function())
+        except PlacesCanceled as exc:
+            self.progress.emit(str(exc))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class CharacterTask(FileTask):
+    progress = Signal(str)
+
+    def __init__(self, path, library, provider, settings, parent=None):
+        self.cancel_event = Event()
+        def work():
+            text = read_prose(path)
+            def check():
+                if source_hash(read_prose(path)) != source_hash(text):
+                    raise ValueError('Prose changed during character generation; run it again')
+            return detect_characters(text, library, provider, settings, cancel=self.cancel_event,
+                                     progress=self.progress.emit, source_check=check)
+        super().__init__(work, parent)
 
 
 class ImageTask(QThread):
@@ -454,7 +497,6 @@ class MainWindow(QMainWindow):
         prose_layout.addWidget(self.prose_viewer)
         prose_layout.addWidget(self.play_prose_button)
         horizontal = QSplitter(Qt.Horizontal)
-        horizontal.addWidget(scroll)
         horizontal.addWidget(prose_panel)
         self.scenes_panel = ScenesPanel()
         self.manuscript_panel = ManuscriptPanel()
@@ -464,6 +506,8 @@ class MainWindow(QMainWindow):
         self.image_prompt_panel = ImagePromptPanel()
         self.image_gallery_panel = ImageGalleryPanel()
         self.visual_library_panel = VisualLibraryPanel()
+        self.places_panel = PlacesPanel()
+        self.characters_panel = CharactersPanel()
         self.video_production_panel = VideoProductionPanel()
         self.animation_panel = AnimationPanel()
         self.production_dashboard = ProductionDashboard()
@@ -473,6 +517,9 @@ class MainWindow(QMainWindow):
         self.quality_control_panel.navigate.connect(self._navigate_issue)
         self.animation_panel.status_changed.connect(self._refresh_animation_states)
         self.workspace_tabs = QTabWidget()
+        self.workspace_tabs.addTab(scroll, "Start")
+        self.workspace_tabs.addTab(self.places_panel, "Places")
+        self.workspace_tabs.addTab(self.characters_panel, "Characters")
         self.workspace_tabs.addTab(self.scenes_panel, "Scenes")
         self.workspace_tabs.addTab(self.storyboard_panel, "Storyboard")
         self.workspace_tabs.addTab(self.visual_library_panel, "Visual Library")
@@ -509,6 +556,18 @@ class MainWindow(QMainWindow):
         self.visual_library_panel.extract_requested.connect(self._extract_entities)
         self.visual_library_panel.cancel_requested.connect(self._cancel_entity_extraction)
         self.visual_library_panel.changed.connect(self._visuals_changed)
+        self.characters_panel.generate_requested.connect(self._generate_characters)
+        self.characters_panel.cancel_requested.connect(self._cancel_characters)
+        self.characters_panel.import_requested.connect(self._import_character_images)
+        self.characters_panel.changed.connect(self.visual_library_panel.refresh)
+        self.characters_panel.changed.connect(self._refresh_shot_visuals)
+        self.characters_panel.error.connect(lambda message: self._show_error('Characters', message))
+        self.places_panel.detect_requested.connect(self._detect_places)
+        self.places_panel.cancel_requested.connect(self._cancel_places)
+        self.places_panel.scene_requested.connect(self._open_place_scene)
+        self.places_panel.changed.connect(self.visual_library_panel.refresh)
+        self.places_panel.changed.connect(self._refresh_shot_visuals)
+        self.places_panel.error.connect(lambda message: self._show_error('Could not save place', message))
         self.visual_library_panel.style_override_requested.connect(self._visual_style_override)
         horizontal.addWidget(self.workspace_tabs)
         self.storyboard_panel.generate_requested.connect(lambda: self._generate_storyboards(False))
@@ -549,9 +608,8 @@ class MainWindow(QMainWindow):
         self.scenes_panel.play_scene_requested.connect(self._play_scene)
         self.scenes_panel.correction_requested.connect(self._correct_scene_time)
         self.scenes_panel.transcript_requested.connect(self._view_transcript)
-        horizontal.setStretchFactor(0, 1)
-        horizontal.setStretchFactor(1, 3)
-        horizontal.setStretchFactor(2, 2)
+        horizontal.setStretchFactor(0, 3)
+        horizontal.setStretchFactor(1, 2)
 
         self.audio_player = AudioPlayer()
         self.audio_player.playback_error.connect(self._playback_error)
@@ -582,6 +640,12 @@ class MainWindow(QMainWindow):
         self.import_audio_button.setEnabled(session is not None and not busy)
         self.visual_library_panel.prepare_references_button.setEnabled(session is not None and not busy)
         self.visual_library_panel.generate_reference_button.setEnabled(session is not None and not busy)
+        self.characters_panel.set_busy(busy, bool(session and session.file_status()[0]), isinstance(self._task, CharacterTask))
+        self.places_panel.busy = busy
+        self.places_panel.detect_button.setEnabled(bool(session and session.file_status()[0]) and not busy)
+        self.places_panel.cancel_button.setEnabled(isinstance(self._task, PlaceTask))
+        for widget in (self.places_panel.save_button, self.places_panel.name_edit, self.places_panel.description_edit):
+            widget.setEnabled(self.places_panel.current_place() is not None and not busy)
         prose_available = bool(session and session.file_status()[0])
         audio_available = bool(session and session.file_status()[1])
         self.scenes_panel.set_state(prose_available and self._task is None,
@@ -676,6 +740,8 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0,lambda opened=session:
                     self._recover_image_jobs(automatic=True) if self.session==opened else None)
         self.visual_library_panel.set_library(VisualLibrary(session.root) if session else None)
+        self.places_panel.set_library(VisualLibrary(session.root) if session else None)
+        self.characters_panel.set_library(VisualLibrary(session.root) if session else None)
         self._cached_transcript = None
         self._highlighted_span = None
         self.scenes_panel.set_alignment(None)
@@ -739,6 +805,10 @@ class MainWindow(QMainWindow):
             digest, scenes = self.session.database.load_scenes()
             self.scenes_panel.set_scenes(scenes, bool(digest and
                 (digest != source_hash(text) or not scenes_match_inclusion(scenes, self.manuscript_panel.sections))))
+            if not self.scenes_panel.outdated:
+                link_places(self.places_panel.library)
+                self.visual_library_panel.refresh()
+            self.places_panel.refresh()
             if self._alignment:
                 self._load_current_alignment()
         except ProjectDatabaseError as exc:
@@ -1157,6 +1227,7 @@ class MainWindow(QMainWindow):
                 scenes = split_scene(self._source_text, self.scenes_panel.scenes,
                                      scene.identifier, choices[choice])
                 self.session.database.replace_scenes(self._source_text, scenes)
+                self._load_scene_records(self._source_text)
                 self.scenes_panel.set_scenes(scenes, select_id=scene.identifier)
                 self._load_current_alignment()
             except (ValueError, ProjectDatabaseError) as exc:
@@ -1170,6 +1241,7 @@ class MainWindow(QMainWindow):
             self._require_current_scenes()
             scenes = merge_with_next(self._source_text, self.scenes_panel.scenes, scene.identifier)
             self.session.database.replace_scenes(self._source_text, scenes)
+            self._load_scene_records(self._source_text)
             self.scenes_panel.set_scenes(scenes, select_id=scene.identifier)
             self._load_current_alignment()
         except (ValueError, ProjectDatabaseError) as exc:
@@ -1456,7 +1528,103 @@ class MainWindow(QMainWindow):
             self._refresh_shot_visuals()
         except (ValueError, ProjectDatabaseError) as exc: self._show_error('Visual reference', str(exc))
 
+    def _generate_characters(self):
+        if not self.session or self._task or not self.characters_panel.generate_button.isEnabled():
+            return
+        try:
+            path = self.session.project.resolved_prose(self.session.root)
+            if not path or not path.is_file():
+                raise ValueError('Import the original prose first')
+            settings = load_ai_settings()
+            task = CharacterTask(path, self.characters_panel.library, make_provider(settings), settings, self)
+            self._task = task
+            task.progress.connect(self.characters_panel.status.setText)
+            task.succeeded.connect(self._characters_ready)
+            task.failed.connect(lambda message: self.characters_panel.status.setText(message))
+            task.failed.connect(lambda message: self._show_error('Character generation', message))
+            task.finished.connect(self._task_finished)
+            task.finished.connect(task.deleteLater)
+            self.characters_panel.status.setText('Reading the entire prose for recurring characters…')
+            self._refresh()
+            task.start()
+        except (ValueError, ProjectDatabaseError, OSError) as exc:
+            self._show_error('Could not generate characters', str(exc))
+
+    def _characters_ready(self, characters):
+        self.characters_panel.refresh()
+        self.visual_library_panel.refresh()
+        self.characters_panel.status.setText(
+            f'{len(characters)} recurring characters found, including resolved pronoun appearances. Review visible attributes and choose reference images.'
+            if characters else 'No recurring characters could be resolved. A character must participate in at least two paragraphs, including unambiguous pronoun references.')
+
+    def _cancel_characters(self):
+        if isinstance(self._task, CharacterTask):
+            self._task.cancel_event.set()
+            self.characters_panel.status.setText('Canceling after the current AI request…')
+
+    def _import_character_images(self, identifier, paths):
+        if not self.session or self._task: return
+        library = self.characters_panel.library
+        def work():
+            imported, failures = 0, []
+            for path in paths:
+                try:
+                    asset = library.import_image(path)
+                    if not any(r.asset_id == asset.identifier for r in library.references(identifier)):
+                        library.attach_image(EntityReference(entity_id=identifier, asset_id=asset.identifier,
+                            description=path.name, is_primary=not library.references(identifier)))
+                    imported += 1
+                except (ValueError, OSError, ProjectDatabaseError) as exc:
+                    failures.append(f'{path.name}: {exc}')
+            return imported, failures
+        def ready(result):
+            self.characters_panel.refresh()
+            self.visual_library_panel.refresh()
+            count, failures = result
+            self.characters_panel.status.setText(f'{count} reference image(s) imported. ' + '; '.join(failures))
+        self._start_task(work, ready, 'Character reference images')
+
+    def _detect_places(self):
+        if not self.session or self._task or not self.places_panel.detect_button.isEnabled():
+            return
+        try:
+            path = self.session.project.resolved_prose(self.session.root)
+            if not path or not path.is_file():
+                raise ValueError('Import the original prose first')
+            settings = load_ai_settings()
+            task = PlaceTask(path, self.places_panel.library, make_provider(settings), settings, self)
+            self._task = task
+            task.progress.connect(self.places_panel.status.setText)
+            task.succeeded.connect(self._places_ready)
+            task.failed.connect(lambda message: self._show_error('Place detection', message))
+            task.finished.connect(self._task_finished)
+            task.finished.connect(task.deleteLater)
+            self.places_panel.status.setText('Reading original prose for places…')
+            self._refresh()
+            task.start()
+        except (ValueError, ProjectDatabaseError, OSError) as exc:
+            self._show_error('Could not detect places', str(exc))
+
+    def _places_ready(self, places):
+        self.places_panel.refresh()
+        self.visual_library_panel.refresh()
+        self.places_panel.status.setText(f'{len(places)} places listed in prose order, described, and linked to available scenes.')
+
+    def _cancel_places(self):
+        if isinstance(self._task, PlaceTask):
+            self._task.cancel_event.set()
+            self.places_panel.status.setText('Canceling after the current AI request…')
+
+    def _open_place_scene(self, identifier):
+        for index, scene in enumerate(self.scenes_panel.scenes):
+            if scene.identifier == identifier:
+                self.scenes_panel.list_widget.setCurrentRow(index)
+                self.workspace_tabs.setCurrentWidget(self.scenes_panel)
+                break
+
     def _visuals_changed(self):
+        self.characters_panel.refresh()
+        self.places_panel.refresh()
         self._refresh_shot_visuals()
 
     def _visual_style_override(self, scope, style):
@@ -1566,6 +1734,7 @@ class MainWindow(QMainWindow):
     def _entities_ready(self, created):
         if not self.session: return
         self.visual_library_panel.refresh()
+        self.places_panel.refresh()
         self.visual_library_panel.status.setText(f'Extracted entities; {len(created)} new suggestion(s)')
 
     def _entity_finished(self):
@@ -2357,6 +2526,14 @@ class MainWindow(QMainWindow):
         self.quality_control_panel.refresh()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if isinstance(self._task, CharacterTask):
+            self._cancel_characters()
+            event.ignore()
+            return
+        if isinstance(self._task, PlaceTask):
+            self._cancel_places()
+            event.ignore()
+            return
         if self.quality_control_panel.worker and self.quality_control_panel.worker.isRunning():
             event.ignore()
             self.statusBar().showMessage('Finishing quality checks before closing', 5000)
