@@ -12,6 +12,7 @@ from PySide6.QtGui import QImageReader
 from prose_to_video.models.generated_image import GeneratedImage
 from prose_to_video.models.image_job import ImageGenerationSettings, ImageJob, ProviderImage
 from prose_to_video.storage.database import ProjectDatabase
+from prose_to_video.storage.ai_preferences import load_tti_defaults
 
 
 class ImageStore:
@@ -28,7 +29,10 @@ class ImageStore:
             scale=min(1536/video.width,1536/video.height)
             width=max(64,round(video.width*scale/16)*16)
             height=max(64,round(video.height*scale/16)*16)
-            return ImageGenerationSettings(width=width,height=height)
+            defaults = load_tti_defaults()
+            if defaults['provider'] == 'ComfyUI':
+                defaults['quality'] = 'auto'
+            return ImageGenerationSettings(width=width,height=height,**defaults)
 
     def save_settings(self, value):
         with closing(self.db._connect()) as con, con:

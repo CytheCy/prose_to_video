@@ -97,7 +97,10 @@ class ProseViewer(QPlainTextEdit):
         selection = QTextEdit.ExtraSelection()
         selection.cursor = cursor
         selection.format = QTextCharFormat()
-        selection.format.setBackground(QColor({"scene":"#ffe28a", "shot":"#b5e3f4", "playback":"#ffa86b"}[name]))
+        color = QColor({"scene":"#ffe28a", "shot":"#b5e3f4", "playback":"#ffa86b"}[name])
+        if name == "scene":
+            color.setAlpha(64)
+        selection.format.setBackground(color)
         return selection
 
     def selected_source_range(self) -> tuple[int, int] | None:

@@ -38,10 +38,8 @@ def save_ai_settings(settings: AISettings) -> None:
         raise ValueError("Could not save AI settings")
 
 
-class AISettingsDialog(QDialog):
-    def __init__(self, settings: AISettings, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("AI Scene Detection Settings")
+class AISettingsFields:
+    def _build_fields(self, settings: AISettings):
         self.provider = QComboBox()
         self.provider.addItem("OpenAI")
         self.provider.setCurrentText(settings.provider)
@@ -81,13 +79,11 @@ class AISettingsDialog(QDialog):
                               ("Model context tokens:", self.context_tokens),
                               ("Chunk characters:", self.chunk_chars), ("Overlap characters:", self.overlap_chars)):
             form.addRow(label, widget)
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self._accept)
-        buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Choose a text file containing only the API key, or use an environment variable. Only the file path is saved."))
+        credentials_help = QLabel("Choose a text file containing only the API key, or use an environment variable. Only the file path is saved.")
+        credentials_help.setWordWrap(True)
+        layout.addWidget(credentials_help)
         layout.addLayout(form)
-        layout.addWidget(buttons)
 
     def values(self) -> AISettings:
         credential_file = self.credential_file.text().strip()
@@ -115,3 +111,22 @@ class AISettingsDialog(QDialog):
                                               self.credential_file.text(), "Text files (*.txt);;All files (*)")
         if path:
             self.credential_file.setText(path)
+
+
+class AISettingsWidget(QWidget, AISettingsFields):
+    """Reusable general AI preferences form."""
+
+    def __init__(self, settings: AISettings, parent=None):
+        super().__init__(parent)
+        self._build_fields(settings)
+
+
+class AISettingsDialog(QDialog, AISettingsFields):
+    def __init__(self, settings: AISettings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("AI Settings")
+        self._build_fields(settings)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        self.layout().addWidget(buttons)

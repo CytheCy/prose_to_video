@@ -125,8 +125,11 @@ def generate_prompt(shot, scene, board, library, project, settings: PromptSettin
     components.camera_angle = shot.camera_angle or components.camera_angle
     components.camera_position = shot.camera_position or components.camera_position
     components.composition = f"Compose for a {payload['aspect_ratio']} frame. {components.composition}".strip()
-    components.visual_style = '; '.join(str(v) for v in payload['style'].values() if v)
+    components.visual_style = '; '.join(str(v) for k, v in payload['style'].items()
+                                        if v and k != 'selected_descriptions')
     if not components.visual_style: components.visual_style = board.settings.visual_style
+    if selected := payload['style'].get('selected_descriptions'):
+        components.visual_style = f'{components.visual_style}\n{selected}'.strip()
     for entity in payload['entities']:
         details = list(entity.get('approved_design', {}).values())
         details += [f"{e['field']}: {e['value']}" for e in entity.get('approved_details', [])]

@@ -134,3 +134,13 @@ def test_reference_preparations_survive_reopening_and_gui_selection(tmp_path):
     assert received and received[0] in {r['identifier'] for r in ReferenceStore(library).records()}
     if panel._integrity_task: panel._integrity_task.wait()
     app.processEvents(); panel.close()
+
+
+def test_start_styles_in_character_reference_prompts(tmp_path):
+    library, _ = setup(tmp_path)
+    identifier = library.add_prompt_style('Ink', 'Fine ink lines on cream paper')
+    original = prepare_character_references(library)
+    library.select_prompt_style(identifier, True)
+    styled = prepare_character_references(library)
+    assert all('Fine ink lines on cream paper' in record['prompt'] for record in styled)
+    assert {r['fingerprint'] for r in original}.isdisjoint(r['fingerprint'] for r in styled)

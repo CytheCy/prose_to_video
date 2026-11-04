@@ -237,3 +237,30 @@ def test_places_tab_detects_shared_settings_and_opens_scene(tmp_path: Path, monk
     assert window.workspace_tabs.currentWidget() is window.scenes_panel
     assert window.scenes_panel.current_scene().identifier == scenes[1].identifier
     window.close()
+
+
+def test_start_styles_add_select_and_reopen(tmp_path):
+    from PySide6.QtCore import Qt
+    from prose_to_video.storage.visual_library import VisualLibrary
+
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    assert not window.styles_panel.isEnabled()
+    session = create_project(tmp_path, 'Styles')
+    window._set_session(session)
+    panel = window.styles_panel
+    panel.name.setText('Watercolor')
+    panel.description.setPlainText('Soft washes and textured paper')
+    panel.add_button.click()
+    assert panel.styles.count() == 1
+    assert not panel.name.text()
+    panel.styles.item(0).setCheckState(Qt.Checked)
+    assert VisualLibrary(session.root).prompt_styles()[0]['selected'] == 1
+    window._set_session(None)
+    assert panel.styles.count() == 0
+    assert not panel.isEnabled()
+    window._set_session(open_project(session.root))
+    assert panel.styles.item(0).checkState() == Qt.Checked
+    panel.styles.item(0).setCheckState(Qt.Unchecked)
+    assert VisualLibrary(session.root).prompt_styles()[0]['selected'] == 0
+    window.close()

@@ -17,10 +17,12 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog, QFormLayo
                                QInputDialog, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
                                QPlainTextEdit, QScrollArea, QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
+from prose_to_video.gui.styles_panel import StylesPanel
 from prose_to_video.gui.audio_player import AudioPlayer
 from prose_to_video.gui.alignment_settings import AlignmentSettingsDialog
 from prose_to_video.gui.waveform import waveform_peaks
-from prose_to_video.gui.ai_settings import AISettingsDialog, load_ai_settings
+from prose_to_video.gui.ai_settings import load_ai_settings
+from prose_to_video.gui.settings_window import SettingsWindow
 from prose_to_video.gui.project_manager import NewProjectDialog, SettingsDialog
 from prose_to_video.gui.prose_viewer import ProseViewer
 from prose_to_video.gui.scenes_panel import ScenesPanel
@@ -418,8 +420,10 @@ class MainWindow(QMainWindow):
         self._update_recent_menu()
         self.save_action = QAction("Save Project", self)
         self.close_action = QAction("Close Project", self)
+        self.preferences_action = QAction("Settings…", self)
+        self.preferences_action.triggered.connect(self._show_settings)
         self.settings_action = QAction("Video Output Settings…", self)
-        self.ai_settings_action = QAction("AI Scene Detection Settings…", self)
+        self.ai_settings_action = QAction("AI Settings…", self)
         self.ai_settings_action.triggered.connect(self._ai_settings)
         self.storyboard_settings_action = QAction("Storyboard Settings…", self)
         self.storyboard_settings_action.triggered.connect(self._storyboard_settings)
@@ -432,11 +436,11 @@ class MainWindow(QMainWindow):
             (self.settings_action, self._settings), (exit_action, self.close),
         ):
             action.triggered.connect(callback)
-        for action in (self.save_action, self.close_action, self.settings_action):
+        for action in (self.save_action, self.close_action):
             file_menu.addAction(action)
-        file_menu.addAction(self.ai_settings_action)
-        file_menu.addAction(self.storyboard_settings_action)
         file_menu.addAction(self.production_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.preferences_action)
         file_menu.addSeparator()
         file_menu.addAction(exit_action)
         self.menuBar().addMenu("&Edit").setEnabled(False)
@@ -482,6 +486,11 @@ class MainWindow(QMainWindow):
         info_layout = QVBoxLayout(info)
         info_layout.addLayout(form)
         info_layout.addLayout(buttons)
+        self.styles_panel = StylesPanel()
+        self.styles_panel.changed.connect(self._visuals_changed)
+        self.styles_panel.changed.connect(self._load_prompt)
+        self.styles_panel.changed.connect(self._load_gallery)
+        info_layout.addWidget(self.styles_panel)
         info_layout.addStretch()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -497,6 +506,9 @@ class MainWindow(QMainWindow):
         prose_layout.addWidget(self.prose_viewer)
         prose_layout.addWidget(self.play_prose_button)
         horizontal = QSplitter(Qt.Horizontal)
+        horizontal.setHandleWidth(8)
+        horizontal.setChildrenCollapsible(False)
+        prose_panel.setMinimumWidth(160)
         horizontal.addWidget(prose_panel)
         self.scenes_panel = ScenesPanel()
         self.manuscript_panel = ManuscriptPanel()
@@ -517,6 +529,8 @@ class MainWindow(QMainWindow):
         self.quality_control_panel.navigate.connect(self._navigate_issue)
         self.animation_panel.status_changed.connect(self._refresh_animation_states)
         self.workspace_tabs = QTabWidget()
+        # Wide inactive tabs must not lock the manuscript divider in place.
+        self.workspace_tabs.setMinimumWidth(360)
         self.workspace_tabs.addTab(scroll, "Start")
         self.workspace_tabs.addTab(self.places_panel, "Places")
         self.workspace_tabs.addTab(self.characters_panel, "Characters")
@@ -610,6 +624,7 @@ class MainWindow(QMainWindow):
         self.scenes_panel.transcript_requested.connect(self._view_transcript)
         horizontal.setStretchFactor(0, 3)
         horizontal.setStretchFactor(1, 2)
+        horizontal.setSizes([600, 500])
 
         self.audio_player = AudioPlayer()
         self.audio_player.playback_error.connect(self._playback_error)
@@ -631,13 +646,14 @@ class MainWindow(QMainWindow):
     def _refresh(self) -> None:
         session = self.session
         busy = self._task is not None or self._scene_task is not None or self._alignment_task is not None or self._storyboard_task is not None or self._entity_task is not None or self._prompt_task is not None or self._image_task is not None or self._render_task is not None or bool(self.production_dashboard.worker and self.production_dashboard.worker.isRunning()) or bool(self.quality_control_panel.worker and self.quality_control_panel.worker.isRunning())
-        for action in (self.new_action, self.open_action):
+        for action in (self.new_action, self.open_action, self.preferences_action):
             action.setEnabled(not busy)
         self.recent_menu.setEnabled(bool(self._recent_projects) and not busy)
         for action in (self.save_action, self.close_action, self.settings_action):
             action.setEnabled(session is not None and not busy)
         self.import_prose_button.setEnabled(session is not None and not busy)
         self.import_audio_button.setEnabled(session is not None and not busy)
+        self.styles_panel.setEnabled(session is not None and not busy)
         self.visual_library_panel.prepare_references_button.setEnabled(session is not None and not busy)
         self.visual_library_panel.generate_reference_button.setEnabled(session is not None and not busy)
         self.characters_panel.set_busy(busy, bool(session and session.file_status()[0]), isinstance(self._task, CharacterTask))
@@ -739,6 +755,7 @@ class MainWindow(QMainWindow):
                 image_notice+=(' · ' if image_notice else '')+f'{len(interrupted)} image jobs need reconciliation'
                 QTimer.singleShot(0,lambda opened=session:
                     self._recover_image_jobs(automatic=True) if self.session==opened else None)
+        self.styles_panel.set_library(VisualLibrary(session.root) if session else None)
         self.visual_library_panel.set_library(VisualLibrary(session.root) if session else None)
         self.places_panel.set_library(VisualLibrary(session.root) if session else None)
         self.characters_panel.set_library(VisualLibrary(session.root) if session else None)
@@ -1109,14 +1126,20 @@ class MainWindow(QMainWindow):
             else:
                 self.prose_viewer.set_layer("playback", None)
 
-    def _ai_settings(self) -> None:
+    def _show_settings(self) -> None:
         try:
-            dialog = AISettingsDialog(load_ai_settings(), self)
-        except ValueError as exc:
-            self._show_error("AI settings", str(exc))
+            dialog = SettingsWindow(self)
+        except (ValueError, ProjectDatabaseError) as exc:
+            self._show_error("Settings", str(exc))
             return
-        if dialog.exec() == dialog.Accepted:
-            self.statusBar().showMessage("AI scene settings saved", 5_000)
+        if dialog.exec() == QDialog.Accepted:
+            self.statusBar().showMessage("Settings saved", 5_000)
+            if self.session:
+                self._load_gallery()
+        dialog.deleteLater()
+
+    def _ai_settings(self) -> None:
+        self._show_settings()
 
     def _detect_scenes(self) -> None:
         if self.session is None:

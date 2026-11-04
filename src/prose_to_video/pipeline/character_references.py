@@ -86,7 +86,7 @@ def prepare_character_references(library, entity_ids=None):
                             f'Clothing: {variant.clothing}' if variant.clothing else '']
                 if variant.age_min is not None or variant.age_max is not None:
                     details.append(f'Age range: {variant.age_min if variant.age_min is not None else "unspecified"} to {variant.age_max if variant.age_max is not None else "unspecified"}')
-            style = library.style().model_dump()
+            style = library.prompt_style_values(library.style())
             prompt = (f'Character identity reference for {entity.name}. One person only, full body standing, '
                       'face clearly visible, neutral pose, uncluttered background, even readable lighting. '
                       'Preserve the supplied identity and the selected age and clothing; do not blend life stages. '

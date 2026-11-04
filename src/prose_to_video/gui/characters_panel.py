@@ -20,7 +20,7 @@ class CharactersPanel(QWidget):
         self.library = None
         self.characters = []
         self.busy = False
-        self.generate_button = QPushButton('Generate Characters')
+        self.generate_button = QPushButton('Detect Characters')
         self.cancel_button = QPushButton('Cancel Generation')
         self.status = QLabel('Generate characters from the entire prose. Only characters in two or more paragraphs are listed.')
         self.status.setWordWrap(True)

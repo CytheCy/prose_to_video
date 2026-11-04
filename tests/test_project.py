@@ -142,3 +142,19 @@ def test_failed_import_rolls_back_new_file(tmp_path: Path, monkeypatch: pytest.M
     with pytest.raises(ProjectError, match="Disk write failed"):
         import_prose(session, source)
     assert list((session.root / "source").iterdir()) == []
+
+
+def test_existing_project_migrates_saved_prompt_styles(tmp_path):
+    from prose_to_video.storage.visual_library import VisualLibrary
+
+    session = create_project(tmp_path, 'Existing')
+    with sqlite3.connect(session.root / 'project.sqlite') as connection:
+        connection.execute('DROP TABLE prompt_style')
+        connection.execute('PRAGMA user_version=12')
+    reopened = open_project(session.root)
+    library = VisualLibrary(reopened.root)
+    assert library.prompt_styles() == []
+    identifier = library.add_prompt_style('Ink', 'Black ink on paper')
+    library.select_prompt_style(identifier, True)
+    assert library.prompt_styles()[0]['selected'] == 1
+    assert reopened.project.identifier == session.project.identifier

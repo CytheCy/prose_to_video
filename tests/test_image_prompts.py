@@ -317,3 +317,35 @@ def test_place_descriptions_inform_prompts_and_invalidate_after_edits(tmp_path):
     payload, *_, after = context()
     assert before != after
     assert payload['places'][0]['description'] == 'Revised brick factory.'
+
+
+def test_selected_start_styles_apply_to_every_shot_and_invalidate_prompts(tmp_path):
+    session, scene, board, library, _ = setup(tmp_path)
+    watercolor = library.add_prompt_style('Watercolor', 'Soft watercolor washes on textured paper')
+    ink = library.add_prompt_style('Ink', 'Fine black ink outlines')
+    unused = library.add_prompt_style('Unused', 'Bright neon plastic')
+    library.select_prompt_style(watercolor, True)
+    library.select_prompt_style(ink, True)
+    library.save_style_override('shot', board.shots[0].identifier,
+                                VisualStyle(general_aesthetic='storybook'))
+    library = VisualLibrary(session.root)
+    assert {s['identifier'] for s in library.prompt_styles() if s['selected']} == {watercolor, ink}
+    store = PromptStore(session.root)
+    fake = FakeProvider()
+    for shot in board.shots:
+        prompt = generate_prompt(shot, scene, board, library, session.project, PromptSettings(), fake)
+        assert 'Soft watercolor washes on textured paper' in prompt.positive_prompt
+        assert 'Fine black ink outlines' in prompt.positive_prompt
+        assert 'Bright neon plastic' not in prompt.positive_prompt
+        assert 'Fine black ink outlines' in fake.payloads[-1]['style']['selected_descriptions']
+        assert not store.validate(prompt, scene, shot, board, session.project, library)
+        library.select_prompt_style(ink, False)
+        assert store.state(prompt, scene, shot, board, session.project, library) == 'Outdated'
+        regenerated = generate_prompt(shot, scene, board, library, session.project, PromptSettings(), fake)
+        assert 'Fine black ink outlines' not in regenerated.positive_prompt
+        library.select_prompt_style(ink, True)
+    library.select_prompt_style(ink, False)
+    library.select_prompt_style(watercolor, False)
+    assert 'selected_descriptions' not in library.package_for_shot(board.shots[0].identifier)['style']
+    with pytest.raises(ValueError):
+        library.add_prompt_style('Empty', '  ')

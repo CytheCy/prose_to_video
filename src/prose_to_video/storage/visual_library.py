@@ -325,6 +325,33 @@ class VisualLibrary:
             ids = [r[0] for r in con.execute('SELECT entity_id FROM entity_shot WHERE shot_id=?', (shot_id,))]
         return [e for e in self.entities() if e.identifier in ids]
 
+    def prompt_styles(self):
+        with self.transaction() as con:
+            return [dict(row) for row in con.execute(
+                'SELECT * FROM prompt_style ORDER BY name COLLATE NOCASE, identifier')]
+
+    def add_prompt_style(self, name: str, description: str):
+        name, description = name.strip(), description.strip()
+        if not name or not description:
+            raise ValueError('Style name and description are required')
+        identifier = str(uuid4())
+        with self.transaction() as con:
+            con.execute('INSERT INTO prompt_style VALUES(?,?,?,0)', (identifier, name, description))
+        return identifier
+
+    def select_prompt_style(self, identifier: str, selected: bool):
+        with self.transaction() as con:
+            if not con.execute('UPDATE prompt_style SET selected=? WHERE identifier=?',
+                               (int(selected), identifier)).rowcount:
+                raise ValueError('Style does not exist')
+
+    def prompt_style_values(self, style: VisualStyle):
+        values = style.model_dump(mode='json')
+        descriptions = [row['description'] for row in self.prompt_styles() if row['selected']]
+        if descriptions:
+            values['selected_descriptions'] = '\n'.join(descriptions)
+        return values
+
     def save_style(self, style: VisualStyle, preset_name=None):
         style = VisualStyle.model_validate(style.model_dump())
         with self.transaction() as con:
@@ -520,7 +547,7 @@ class VisualLibrary:
     def package_for_shot(self, shot_id):
         with self.transaction() as con:
             rows = con.execute('SELECT entity_id, variant_id FROM entity_shot WHERE shot_id=?', (shot_id,)).fetchall()
-        package = {'shot_id': shot_id, 'style': self.style_for_shot(shot_id).model_dump(mode='json'), 'entities': []}
+        package = {'shot_id': shot_id, 'style': self.prompt_style_values(self.style_for_shot(shot_id)), 'entities': []}
         for row in rows:
             entity = self.entity(row['entity_id'])
             if not entity: continue

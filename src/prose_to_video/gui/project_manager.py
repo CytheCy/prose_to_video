@@ -7,7 +7,7 @@ from pathlib import Path
 from pydantic import ValidationError
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
                                QHBoxLayout, QLineEdit, QMessageBox, QPushButton,
-                               QSpinBox, QVBoxLayout)
+                               QSpinBox, QVBoxLayout, QWidget)
 
 from prose_to_video.models.project import VideoSettings
 
@@ -76,10 +76,9 @@ class NewProjectDialog(QDialog):
         return Path(value).expanduser() if value else None
 
 
-class SettingsDialog(QDialog):
+class VideoSettingsWidget(QWidget):
     def __init__(self, settings: VideoSettings, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Video Output Settings")
         self.width = QSpinBox()
         self.height = QSpinBox()
         self.frame_rate = QSpinBox()
@@ -90,15 +89,29 @@ class SettingsDialog(QDialog):
         ):
             widget.setRange(1, maximum)
             widget.setValue(value)
-        form = QFormLayout()
+        form = QFormLayout(self)
         form.addRow("Width (pixels):", self.width)
         form.addRow("Height (pixels):", self.height)
         form.addRow("Frame rate (fps):", self.frame_rate)
+
+    def values(self) -> VideoSettings:
+        return VideoSettings(width=self.width.value(), height=self.height.value(),
+                             frame_rate=self.frame_rate.value())
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, settings: VideoSettings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Video Output Settings")
+        self.video = VideoSettingsWidget(settings)
+        self.width = self.video.width
+        self.height = self.video.height
+        self.frame_rate = self.video.frame_rate
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
+        layout.addWidget(self.video)
         layout.addWidget(buttons)
 
     def _accept(self) -> None:
@@ -110,5 +123,4 @@ class SettingsDialog(QDialog):
         self.accept()
 
     def values(self) -> VideoSettings:
-        return VideoSettings(width=self.width.value(), height=self.height.value(),
-                             frame_rate=self.frame_rate.value())
+        return self.video.values()
