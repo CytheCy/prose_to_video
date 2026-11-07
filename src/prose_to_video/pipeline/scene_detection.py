@@ -1,4 +1,4 @@
-"""AI location/time scene boundaries with exact source partition checks."""
+"""One scene per prose paragraph with earlier-prose continuity and exact offsets."""
 
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ def _description(provider: SceneProvider, text: str, maximum: int, cancel: Event
                  previous_context: str = "", context_limit: int = 1500) -> SceneDescription:
     parts = []
     contextual = getattr(provider, "describe_scene_with_context", None)
-    context_limit = min(context_limit, maximum // 4) if contextual else 0
+    context_limit = min(context_limit, maximum // 2) if contextual else 0
     step = maximum - context_limit
     for start in range(0, len(text), step):
         if cancel.is_set():
@@ -152,7 +152,7 @@ def _scene_prose(text: str, start: int, end: int,
 def detect_scenes(
     text: str, provider: SceneProvider, settings: AISettings,
     cancel: Event | None = None, progress: Callable[[str, int, int], None] | None = None,
-    sections: list[ManuscriptSection] | None = None,
+    sections: list[ManuscriptSection] | None = None, library=None,
 ) -> list[Scene]:
     settings.validate()
     if not text.strip():
@@ -179,24 +179,10 @@ def detect_scenes(
         pending_heading = None
     if not prose_paragraphs:
         raise ValueError("The manuscript has no prose paragraphs to turn into scenes")
-    candidates = set(offsets)
-    selected = {0, *(s.start for s in sections if s.start in candidates)}
-    chunks = make_chunks(text, settings.chunk_chars, settings.overlap_chars)
-    for number, chunk in enumerate(chunks, 1):
-        if cancel.is_set():
-            raise AnalysisCanceled("Scene detection canceled")
-        progress("Detecting location and time changes", number, len(chunks))
-        proposal = provider.propose_boundaries(_labeled(text, chunk.units))
-        units = {u.identifier: u for u in chunk.units}
-        for identifier in proposal.starts:
-            if identifier not in units or not units[identifier].eligible:
-                raise ValueError("AI returned an invalid scene boundary ID")
-            unit = units[identifier]
-            if identifier in chunk.core_ids:
-                # A heading remains attached to its first prose paragraph.
-                boundary = max(offset for offset in candidates if offset <= unit.start)
-                selected.add(boundary)
-    offsets = sorted(selected)
+    from prose_to_video.pipeline.scene_visuals import earlier_paragraph_contexts
+    ranges = list(zip(offsets, offsets[1:] + [len(text)]))
+    contexts = earlier_paragraph_contexts(
+        text, ranges, sections, provider, settings, cancel, progress)
     scenes = []
     for sequence, (start, end) in enumerate(zip(offsets, offsets[1:] + [len(text)]), 1):
         if cancel.is_set():
@@ -206,13 +192,17 @@ def detect_scenes(
         included = any(s.included and s.body_start < end and s.end > start for s in applicable)
         prose = _scene_prose(text, start, end, heading_ranges)
         if included:
-            # Stay within the current included section: headings and editorial material
-            # are never pronoun evidence. The preceding text cannot change source offsets.
+            # Legacy providers use a local excerpt; continuity-aware providers receive
+            # notes from all earlier included paragraphs, without changing source offsets.
             section = next((s for s in applicable if s.included and s.body_start < end and s.end > start), None)
             context_start = max(section.body_start, start - settings.overlap_chars) if section else start
             previous_context = _scene_prose(text, context_start, start, heading_ranges) if context_start < start else ""
+            context_limit = settings.overlap_chars
+            if contexts is not None:
+                previous_context = contexts[start]
+                context_limit = settings.chunk_chars // 3
             description = _description(provider, prose, settings.chunk_chars, cancel,
-                                       previous_context, settings.overlap_chars)
+                                       previous_context, context_limit)
             details = description.model_dump()
         else:
             details = {"title": "Excluded manuscript material", "boundary_reason": "Production inclusion map"}
@@ -221,7 +211,8 @@ def detect_scenes(
                             narrative_formats=formats, viewpoint_category=viewpoint,
                             production_included=included, **details))
     validate_partition(text, scenes)
-    return scenes
+    from prose_to_video.pipeline.scene_visuals import enrich_scene_visuals
+    return enrich_scene_visuals(text, scenes, sections, provider, settings, cancel, progress, library, contexts=contexts)
 
 
 def split_scene(text: str, scenes: list[Scene], identifier: str, offset: int) -> list[Scene]:
@@ -233,8 +224,7 @@ def split_scene(text: str, scenes: list[Scene], identifier: str, offset: int) ->
     if offset not in paragraph_starts(text) or not old.start < offset < old.end:
         raise ValueError("Choose a paragraph boundary inside the selected scene")
     left = old.model_copy(update={"end": offset, "text": text[old.start:offset],
-                                  "summary": "", "actions": [], "boundary_reason": "Manual split; review description",
-                                  "review_status": "Not reviewed"})
+                                  "summary": "", "visual_description": "", "render_type": "cinematic", "actions": [], "boundary_reason": "Manual split; review description"})
     right = Scene(sequence=old.sequence + 1, start=offset, end=old.end, text=text[offset:old.end],
                   title=f"{old.title} (continued)", location=old.location,
                   characters=old.characters.copy(), boundary_reason="Manual split; review description")
@@ -251,9 +241,8 @@ def merge_with_next(text: str, scenes: list[Scene], identifier: str) -> list[Sce
         raise ValueError("Choose a scene with a following scene")
     left, right = scenes[index:index + 2]
     merged = left.model_copy(update={"end": right.end, "text": text[left.start:right.end],
-                                     "summary": "", "actions": [], "environment": "",
+                                     "summary": "", "visual_description": "", "render_type": "cinematic", "actions": [], "environment": "",
                                      "visual_atmosphere": "", "boundary_reason": "Manual merge; review description",
-                                     "review_status": "Not reviewed",
                                      "characters": list(dict.fromkeys(left.characters + right.characters)),
                                      "important_objects": list(dict.fromkeys(left.important_objects + right.important_objects))})
     result = scenes[:index] + [merged] + scenes[index + 2:]

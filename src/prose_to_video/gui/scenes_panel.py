@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import (QComboBox, QFormLayout, QGroupBox, QHBoxLayout,
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (QFormLayout, QGroupBox, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QPlainTextEdit, QDoubleSpinBox,
                                QProgressBar, QPushButton, QScrollArea, QVBoxLayout,
                                QWidget)
@@ -28,10 +28,10 @@ class ScenesPanel(QGroupBox):
     transcript_requested = Signal()
 
     FIELDS = ("title", "summary", "location", "time_of_day", "characters",
-              "point_of_view", "narrative_type", "environment", "important_objects",
+              "point_of_view", "narrative_type", "visual_description", "render_type", "environment", "important_objects",
               "actions", "dialogue_participants", "visual_atmosphere", "boundary_reason")
     LIST_FIELDS = {"characters", "important_objects", "actions", "dialogue_participants"}
-    LONG_FIELDS = {"summary", "environment", "actions", "visual_atmosphere", "boundary_reason",
+    LONG_FIELDS = {"visual_description", "summary", "environment", "actions", "visual_atmosphere", "boundary_reason",
                    "characters", "important_objects", "dialogue_participants"}
 
     def __init__(self, parent=None):
@@ -40,6 +40,13 @@ class ScenesPanel(QGroupBox):
         self.outdated = False
         self.alignment: AlignmentRun | None = None
         self.timings: dict[str, SceneTiming] = {}
+        self.references: dict[str, tuple[list[str], list[str]]] = {}
+        self.place_label = QLabel()
+        self.persistent_characters_label = QLabel()
+        for label in (self.place_label, self.persistent_characters_label):
+            label.setWordWrap(True)
+            label.setTextFormat(Qt.PlainText)
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.detect_button = QPushButton("Detect Scenes")
         self.align_button = QPushButton("Align Audio")
         self.align_cancel_button = QPushButton("Cancel Alignment")
@@ -48,10 +55,6 @@ class ScenesPanel(QGroupBox):
         self.transcript_button = QPushButton("View Transcript")
         self.timing_label = QLabel("No audio alignment")
         self.timing_label.setWordWrap(True)
-        self.review_text = QPlainTextEdit()
-        self.review_text.setReadOnly(True)
-        self.review_text.setPlaceholderText("Select a scene to inspect its transcript and mismatches.")
-        self.review_text.setFixedHeight(150)
         self.start_time = QDoubleSpinBox()
         self.end_time = QDoubleSpinBox()
         for spin in (self.start_time, self.end_time):
@@ -63,8 +66,6 @@ class ScenesPanel(QGroupBox):
         self.split_button = QPushButton("Split Scene…")
         self.merge_button = QPushButton("Merge With Next Scene")
         self.save_button = QPushButton("Save Scene Details")
-        self.review_status = QComboBox()
-        self.review_status.addItems(["Not reviewed", "Reviewed", "Manually edited"])
         self.list_widget = QListWidget()
         self.stage_label = QLabel("")
         self.progress = QProgressBar()
@@ -72,15 +73,20 @@ class ScenesPanel(QGroupBox):
         self.progress.setValue(0)
         self.fields = {}
         form = QFormLayout()
+        form.addRow("Place:", self.place_label)
+        form.addRow("Persistent characters:", self.persistent_characters_label)
         for name in self.FIELDS:
             widget = QPlainTextEdit() if name in self.LONG_FIELDS else QLineEdit()
             if isinstance(widget, QPlainTextEdit):
-                widget.setFixedHeight(65)
+                widget.setFixedHeight(160 if name == "visual_description" else 65)
             if name in self.LIST_FIELDS:
                 widget.setToolTip("One item per line")
+            if name == "visual_description":
+                widget.setToolTip("AI visual staging informed by broader prose; proposed details may go beyond source facts.")
+            elif name == "render_type":
+                widget.setToolTip("cinematic, concept_map, blueprint, cad_visualization, or product_showcase")
             self.fields[name] = widget
             form.addRow(name.replace("_", " ").capitalize() + ":", widget)
-        form.addRow("Review status:", self.review_status)
         detail = QWidget()
         detail.setLayout(form)
         scroll = QScrollArea()
@@ -104,7 +110,6 @@ class ScenesPanel(QGroupBox):
                        QLabel("End"), self.end_time, self.correct_button, self.transcript_button):
             timing_buttons.addWidget(widget)
         layout.addLayout(timing_buttons)
-        layout.addWidget(self.review_text)
         layout.addWidget(scroll, 3)
         layout.addLayout(bottom)
         self.detect_button.clicked.connect(self.detect_requested)
@@ -120,6 +125,7 @@ class ScenesPanel(QGroupBox):
         self.merge_button.clicked.connect(self.merge_requested)
         self.save_button.clicked.connect(self.save_requested)
         self.list_widget.currentRowChanged.connect(self._selected)
+        self._show_references(None)
         self.set_state(False, False)
 
     def _selected(self, index: int) -> None:
@@ -136,7 +142,7 @@ class ScenesPanel(QGroupBox):
         self.outdated = outdated
         self.list_widget.clear()
         for scene in scenes:
-            label = f"{scene.sequence}. {scene.title} — {scene.location or 'Setting unspecified'} [{scene.review_status}]"
+            label = f"{scene.sequence}. {scene.title} — {scene.location or 'Setting unspecified'}"
             timing = self.timings.get(scene.identifier)
             if timing:
                 label += (f" | {format_duration(timing.audio_start)}–{format_duration(timing.audio_end)}"
@@ -150,6 +156,7 @@ class ScenesPanel(QGroupBox):
             self._show_scene(None)
 
     def _show_scene(self, scene: Scene | None) -> None:
+        self._show_references(scene)
         for name, widget in self.fields.items():
             value = getattr(scene, name) if scene else ""
             display = "\n".join(value) if isinstance(value, list) else value or ""
@@ -157,7 +164,6 @@ class ScenesPanel(QGroupBox):
                 widget.setPlainText(display)
             else:
                 widget.setText(display)
-        self.review_status.setCurrentText(scene.review_status if scene else "Not reviewed")
         timing = self.timings.get(scene.identifier) if scene else None
         if timing:
             duration = format_duration(timing.duration) if timing.duration is not None else "Unresolved"
@@ -171,22 +177,16 @@ class ScenesPanel(QGroupBox):
             self.timing_label.setText("No current audio alignment" if scene else "No scene selected")
             self.start_time.setValue(0)
             self.end_time.setValue(0)
-        if scene and self.alignment:
-            transcript = [s.text for s in self.alignment.transcript
-                          if timing and timing.audio_start is not None and
-                          s.end >= timing.audio_start and s.start <= timing.audio_end]
-            unmatched = [w.text for w in self.alignment.words if scene.start <= w.source_start < scene.end
-                         and w.status != "matched"]
-            issues = [issue.message for issue in self.alignment.issues
-                      if (issue.source_start is not None and scene.start <= issue.source_start < scene.end) or
-                      (timing and timing.audio_start is not None and issue.audio_start is not None and
-                       timing.audio_start <= issue.audio_start <= timing.audio_end)]
-            self.review_text.setPlainText("Original prose:\n" + scene.text + "\n\nTranscribed speech:\n" +
-                (" ".join(transcript) or "No matched transcript") + "\n\nUnmatched manuscript words:\n" +
-                (" ".join(unmatched) or "None") + "\n\nWarnings:\n" +
-                ("\n".join([*timing.warnings, *issues]) if timing else "None"))
-        else:
-            self.review_text.clear()
+
+    def set_references(self, references: dict[str, tuple[list[str], list[str]]]) -> None:
+        self.references = references
+        self._show_references(self.current_scene())
+
+    def _show_references(self, scene: Scene | None) -> None:
+        places, characters = self.references.get(scene.identifier, ([], [])) if scene else ([], [])
+        self.place_label.setText("\n".join(places) or ("No linked place" if scene else "No scene selected"))
+        self.persistent_characters_label.setText(
+            "\n".join(characters) or ("No persistent characters identified" if scene else "No scene selected"))
 
     def set_alignment(self, alignment: AlignmentRun | None) -> None:
         current = self.current_scene()
@@ -205,8 +205,6 @@ class ScenesPanel(QGroupBox):
                 changes[name] = [line.strip() for line in value.splitlines() if line.strip()]
             else:
                 changes[name] = value.strip() or (None if name in {"location", "time_of_day", "point_of_view", "narrative_type"} else "")
-        changed = any(getattr(current, key) != value for key, value in changes.items())
-        changes["review_status"] = "Manually edited" if changed else self.review_status.currentText()
         return current.model_copy(update=changes)
 
     def set_state(self, available: bool, running: bool, audio_available: bool = False,
@@ -232,7 +230,6 @@ class ScenesPanel(QGroupBox):
         self.list_widget.setEnabled(not running)
         for widget in self.fields.values():
             widget.setEnabled(selected and not busy)
-        self.review_status.setEnabled(selected and not busy)
 
     def set_progress(self, stage: str, current: int, total: int) -> None:
         self.stage_label.setText(f"{stage}: {current}/{total}")

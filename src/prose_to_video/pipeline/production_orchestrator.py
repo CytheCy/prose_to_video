@@ -401,7 +401,8 @@ class ProductionOrchestrator:
         elif task.kind == 'scenes':
             from prose_to_video.storage.manuscript import ManuscriptStore
             found = detect_scenes(text, self._provider(run), AISettings(**run.profile.narrative_settings),
-                                  self.cancel_event, sections=ManuscriptStore(self.session.database).sections(text))
+                                  self.cancel_event, sections=ManuscriptStore(self.session.database).sections(text),
+                                  library=VisualLibrary(self.session.root))
             self.session.database.replace_scenes(text, found)
             task.output_ids = [s.identifier for s in found]
         elif task.kind == 'alignment':

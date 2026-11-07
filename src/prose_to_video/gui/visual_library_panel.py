@@ -32,12 +32,11 @@ class IntegrityTask(QThread):
         except Exception as exc: self.succeeded.emit([str(exc)])
 
 class VisualLibraryPanel(QWidget):
-    prepare_references_requested = Signal()
-    generate_reference_requested = Signal(str)
     extract_requested = Signal(str)
     cancel_requested = Signal()
     changed = Signal()
     style_override_requested = Signal(str, object)
+    ENTITY_TYPES = tuple(kind for kind in ENTITY_TYPES if kind != 'Character')
     ENTITY_FIELDS = ('name', 'description', 'appearance_description', 'distinguishing_features',
                      'colors_materials', 'size_proportions', 'clothing_accessories', 'user_notes')
     STYLE_FIELDS = tuple(VisualStyle.model_fields)
@@ -50,7 +49,7 @@ class VisualLibraryPanel(QWidget):
         self._integrity_task = None
         self._all_entities = []
         self.search = QLineEdit(); self.search.setPlaceholderText('Search entities')
-        self.type_filter = QComboBox(); self.type_filter.addItems(['All types', *ENTITY_TYPES])
+        self.type_filter = QComboBox(); self.type_filter.addItems(['All types', *self.ENTITY_TYPES])
         self.entities = QListWidget()
         self.status = QLabel('Open a project to use the Visual Library'); self.status.setWordWrap(True)
         self.fields = {}
@@ -59,7 +58,7 @@ class VisualLibraryPanel(QWidget):
             widget = QLineEdit() if field == 'name' else QPlainTextEdit()
             if isinstance(widget, QPlainTextEdit): widget.setFixedHeight(55)
             self.fields[field] = widget; form.addRow(field.replace('_', ' ').capitalize(), widget)
-        self.entity_type = QComboBox(); self.entity_type.addItems(ENTITY_TYPES)
+        self.entity_type = QComboBox(); self.entity_type.addItems(self.ENTITY_TYPES)
         self.review_status = QComboBox(); self.review_status.addItems(REVIEW_STATUSES)
         self.recurring = QComboBox(); self.recurring.addItems(['Recurring', 'Scene-specific'])
         self.aliases = QLineEdit(); self.aliases.setPlaceholderText('Comma-separated aliases')
@@ -71,7 +70,6 @@ class VisualLibraryPanel(QWidget):
                               ('Parent location', self.parent_location),
                               ('Spatial relationship', self.spatial_relationship)]: form.addRow(label, widget)
         self.scene_links = QListWidget(); self.shot_links = QListWidget()
-        self.reference_prompts = QListWidget()
         self.evidence = QListWidget(); self.variants = QListWidget(); self.gallery = QListWidget()
         self.gallery.setIconSize(QSize(72, 72))
         self.preview = QLabel('Select a reference image'); self.preview.setAlignment(Qt.AlignCenter)
@@ -115,14 +113,6 @@ class VisualLibraryPanel(QWidget):
         right_layout.addWidget(QLabel('Source evidence (double-click to approve or reject)')); right_layout.addWidget(self.evidence)
         right_layout.addWidget(QLabel('Appearance variants')); right_layout.addWidget(self.variants)
         variant_button = QPushButton('Add Variant'); variant_button.clicked.connect(self.add_variant); right_layout.addWidget(variant_button)
-        right_layout.addWidget(QLabel('Prepared character references'))
-        right_layout.addWidget(self.reference_prompts)
-        prepare = self.prepare_references_button = QPushButton('Prepare Character References')
-        prepare.clicked.connect(self.prepare_references_requested.emit)
-        right_layout.addWidget(prepare)
-        generate = self.generate_reference_button = QPushButton('Review / Generate Reference…')
-        generate.clicked.connect(self._generate_reference)
-        right_layout.addWidget(generate)
         right_layout.addWidget(QLabel('Reference images')); right_layout.addWidget(self.gallery)
         right_layout.addWidget(self.preview)
         ref_form = QFormLayout(); ref_form.addRow('Role', self.role); ref_form.addRow('Description', self.reference_description)
@@ -184,7 +174,7 @@ class VisualLibraryPanel(QWidget):
         QMessageBox.warning(self, 'Visual Library', str(exc))
 
     def refresh(self, selected_id=None):
-        self._all_entities = self.library.entities() if self.library else []
+        self._all_entities = [e for e in self.library.entities() if e.entity_type != 'Character'] if self.library else []
         selected_id = selected_id or self.current_id
         self._filter()
         for i in range(self.entities.count()):
@@ -232,13 +222,7 @@ class VisualLibraryPanel(QWidget):
     def _load_related(self):
         self.scene_links.clear(); self.shot_links.clear(); self.evidence.clear(); self.variants.clear(); self.gallery.clear()
         self.preview.clear()
-        self.reference_prompts.clear()
         if not self.library or not self.current_id: return
-        from prose_to_video.pipeline.character_references import ReferenceStore
-        for record in ReferenceStore(self.library).records(self.current_id):
-            self.reference_prompts.addItem(f"{record['label']} [{record['status']}]")
-            self.reference_prompts.item(self.reference_prompts.count()-1).setData(Qt.UserRole, record['identifier'])
-        if self.reference_prompts.count(): self.reference_prompts.setCurrentRow(self.reference_prompts.count()-1)
         db = self.library.db
         scenes = {s.identifier: s for s in db.load_scenes()[1]}
         for scene_id in self.library.scenes_for(self.current_id):
@@ -267,10 +251,6 @@ class VisualLibraryPanel(QWidget):
             if thumb.is_file(): item.setIcon(QIcon(str(thumb)))
         if self.gallery.count(): self.gallery.setCurrentRow(0)
         self.status.setText(f'{self.library.entity(self.current_id).name} · {len(self.library.shots_for(self.current_id))} affected shots')
-
-    def _generate_reference(self):
-        item = self.reference_prompts.currentItem()
-        if item: self.generate_reference_requested.emit(item.data(Qt.UserRole))
 
     def _selected_reference(self):
         item = self.gallery.currentItem()
@@ -319,7 +299,8 @@ class VisualLibraryPanel(QWidget):
 
     def merge_entities(self):
         if not self.library or not self.current_id: return
-        options = [e for e in self.library.entities() if e.identifier != self.current_id]
+        options = [e for e in self.library.entities()
+                   if e.identifier != self.current_id and e.entity_type != 'Character']
         if not options: return
         labels = [f'{e.name} [{e.identifier[:8]}]' for e in options]
         choice, ok = QInputDialog.getItem(self, 'Merge Entities', 'Merge into selected entity:', labels, editable=False)

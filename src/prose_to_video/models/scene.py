@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from uuid import uuid4
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -26,20 +27,27 @@ class Scene(BaseModel):
     viewpoint_category: str = "direct"
     production_included: bool = True
     summary: str = ""
+    visual_description: str = ""
+    render_type: Literal["cinematic", "concept_map", "blueprint", "cad_visualization", "product_showcase"] = "cinematic"
     environment: str = ""
     important_objects: list[str] = Field(default_factory=list)
     actions: list[str] = Field(default_factory=list)
     dialogue_participants: list[str] = Field(default_factory=list)
     visual_atmosphere: str = ""
     boundary_reason: str = ""
-    review_status: str = "Not reviewed"
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_review_status(cls, data):
+        # Older projects stored a review status in each scene's JSON record.
+        if isinstance(data, dict) and "review_status" in data:
+            data = {key: value for key, value in data.items() if key != "review_status"}
+        return data
 
     @model_validator(mode="after")
     def valid_range(self) -> Scene:
         if self.end <= self.start or len(self.text) != self.end - self.start:
             raise ValueError("Scene offsets must match the exact scene text")
-        if self.review_status not in {"Not reviewed", "Reviewed", "Manually edited"}:
-            raise ValueError("Invalid scene review status")
         return self
 
 

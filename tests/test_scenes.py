@@ -65,7 +65,7 @@ def test_scene_model_and_partition_validation() -> None:
         validate_partition(TEXT, [scenes[0].model_copy(update={"text": "X" + scenes[0].text[1:]}), scenes[1]])
 
 
-def test_chunk_offsets_and_general_location_boundaries() -> None:
+def test_chunk_offsets_and_paragraph_boundaries() -> None:
     text = ("A" * 800 + "\n\n") * 6 + "At the station, Ben arrives.\n\n" + ("B" * 800 + "\n\n") * 5
     chunks = make_chunks(text, 1800, 250)
     assert len(chunks) > 2
@@ -76,7 +76,8 @@ def test_chunk_offsets_and_general_location_boundaries() -> None:
     settings = AISettings(chunk_chars=1800, overlap_chars=250)
     scenes = detect_scenes(text, MockProvider(), settings)
     validate_partition(text, scenes)
-    assert [s.start for s in scenes] == [0, text.index("At the station")]
+    assert len(scenes) == 12
+    assert [s.start for s in scenes] == paragraph_starts(text)
     assert paragraph_starts(text)[0] == 0
     assert "Before\n***\nAfter".index("***") in paragraph_starts("Before\n***\nAfter")
 
@@ -91,20 +92,21 @@ def test_chunk_input_budget_for_many_short_paragraphs() -> None:
                                            AISettings(chunk_chars=1200, overlap_chars=100)))
 
 
-def test_ai_boundaries_keep_continuous_action_and_cancellation() -> None:
+def test_paragraph_boundaries_and_cancellation() -> None:
     scenes = detect_scenes(TEXT, MockProvider(), AISettings(chunk_chars=1000, overlap_chars=100))
-    assert [scene.start for scene in scenes] == [0, TEXT.index("At the station")]
+    assert [scene.start for scene in scenes] == paragraph_starts(TEXT)
     cancel = Event()
     cancel.set()
     with pytest.raises(AnalysisCanceled):
         detect_scenes(TEXT, MockProvider(), AISettings(), cancel)
 
 
-def test_continuous_paragraphs_within_heading_section_share_scene() -> None:
+def test_each_paragraph_within_heading_section_has_own_scene() -> None:
     text = "# Part One\nFirst paragraph.\nSecond paragraph.\n# Part Two\nThird paragraph.\n"
     scenes = detect_scenes(text, MockProvider(), AISettings())
     assert [scene.text for scene in scenes] == [
-        "# Part One\nFirst paragraph.\nSecond paragraph.\n",
+        "# Part One\nFirst paragraph.\n",
+        "Second paragraph.\n",
         "# Part Two\nThird paragraph.\n",
     ]
     assert all(scene.production_included for scene in scenes)
@@ -126,8 +128,8 @@ def test_heading_text_is_not_used_to_describe_or_classify_scene() -> None:
     text = "# Radio plays in cafe\nAda walks into the garden.\nShe waters the flowers.\n"
     provider = CapturingProvider()
     scenes = detect_scenes(text, provider, AISettings())
-    assert provider.passages == ["Ada walks into the garden.\nShe waters the flowers."]
-    assert [scene.viewpoint_category for scene in scenes] == ["direct"]
+    assert provider.passages == ["Ada walks into the garden.", "She waters the flowers."]
+    assert [scene.viewpoint_category for scene in scenes] == ["direct", "direct"]
     assert scenes[0].text.startswith("# Radio plays in cafe\n")
 
 
@@ -143,7 +145,7 @@ def test_heading_only_section_does_not_create_a_scene() -> None:
 def test_line_paragraphs_with_blank_lines_and_crlf() -> None:
     text = "First.\r\nSecond.\r\n\r\nThird.\r\n"
     scenes = detect_scenes(text, MockProvider(), AISettings())
-    assert [scene.text for scene in scenes] == [text]
+    assert [scene.text for scene in scenes] == ["First.\r\n", "Second.\r\n\r\n", "Third.\r\n"]
     validate_partition(text, scenes)
 
 
@@ -179,7 +181,6 @@ def test_split_merge_and_ordering() -> None:
     assert [s.sequence for s in split] == [1, 2, 3]
     assert split[0].identifier == scenes[0].identifier
     assert split[1].identifier not in {s.identifier for s in scenes}
-    assert split[0].review_status == "Not reviewed"
     assert split[0].summary == ""
     validate_partition(TEXT, split)
     merged = merge_with_next(TEXT, split, split[0].identifier)
@@ -204,7 +205,7 @@ def test_migration_reopen_edits_and_source_hash(tmp_path: Path) -> None:
     db.replace_scenes(TEXT, scenes_for())
     digest, loaded = ProjectDatabase(db.path).load_scenes()
     assert digest == source_hash(TEXT)
-    edit = loaded[0].model_copy(update={"summary": "Ada waits for the door.", "review_status": "Manually edited"})
+    edit = loaded[0].model_copy(update={"summary": "Ada waits for the door."})
     db.update_scene(edit, TEXT)
     assert open_project(session.root).database.load_scenes()[1][0].summary == edit.summary
     with pytest.raises(ProjectDatabaseError, match="outdated"):
@@ -213,6 +214,23 @@ def test_migration_reopen_edits_and_source_hash(tmp_path: Path) -> None:
     _, remaining = db.load_scenes()
     validate_partition(TEXT, remaining)
     assert len(remaining) == 1
+
+
+@pytest.mark.parametrize("status", ["Not reviewed", "Reviewed", "Manually edited"])
+def test_legacy_scene_review_status_is_discarded(tmp_path: Path, status: str) -> None:
+    session = create_project(tmp_path, "Legacy")
+    scenes = scenes_for()
+    session.database.replace_scenes(TEXT, scenes)
+    legacy = {**scenes[0].model_dump(), "review_status": status}
+    with sqlite3.connect(session.database.path) as connection:
+        connection.execute("UPDATE scene SET data_json=? WHERE identifier=?",
+                           (json.dumps(legacy), scenes[0].identifier))
+    loaded = open_project(session.root).database.load_scenes()[1]
+    assert loaded == scenes
+    session.database.update_scene(loaded[0], TEXT)
+    with sqlite3.connect(session.database.path) as connection:
+        records = connection.execute("SELECT data_json FROM scene").fetchall()
+    assert all("review_status" not in json.loads(row[0]) for row in records)
 
 
 def test_split_and_merge_persist_after_reopen(tmp_path: Path) -> None:
@@ -266,6 +284,8 @@ def test_exports(tmp_path: Path) -> None:
     export_json(json_path, TEXT, scenes)
     export_markdown(markdown_path, TEXT, scenes)
     data = json.loads(json_path.read_text(encoding="utf-8"))
+    assert all("review_status" not in scene for scene in data["scenes"])
+    assert "Review status" not in markdown_path.read_text(encoding="utf-8")
     assert data["source_sha256"] == source_hash(TEXT)
     assert data["scenes"][0]["text"] == scenes[0].text
     assert "## Scene 2: Station" in markdown_path.read_text(encoding="utf-8")
@@ -305,12 +325,12 @@ def test_context_provider_instructions_separate_source(monkeypatch):
     provider.describe_scene_with_context('She sits.', 'Ada arrives.')
     instruction, payload, schema = provider._request.call_args.args
     assert json.loads(payload) == {'source_prose': 'She sits.', 'previous_context': 'Ada arrives.'}
-    assert 'pronoun resolution ONLY' in instruction
+    assert 'Search previous_context' in instruction
+    assert 'post office' in instruction
 
 
-def test_reject_unknown_ai_boundary_before_saving():
-    class Invalid(MockProvider):
+def test_paragraph_boundaries_do_not_require_ai_decisions():
+    class NoBoundaries(MockProvider):
         def propose_boundaries(self, labeled_text):
-            return BoundaryProposal(starts=[99999])
-    with pytest.raises(ValueError, match='invalid scene boundary'):
-        detect_scenes(TEXT, Invalid(), AISettings())
+            raise AssertionError("Paragraph boundaries are deterministic")
+    assert len(detect_scenes(TEXT, NoBoundaries(), AISettings())) == 4

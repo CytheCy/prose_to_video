@@ -93,12 +93,92 @@ def test_panel_preview_and_folder_selection(tmp_path, monkeypatch):
     panel._choose_folder()
     assert received == [(entity.identifier, [path])]
     panel.fields['appearance_description'].setPlainText('')
-    panel._save()
     result = detect_characters('Mara enters.\n\nShe leaves.', library, Provider(), AISettings())
     assert result[0].appearance_description == ''
     assert library.references(entity.identifier)[0].asset_id == asset.identifier
     panel.set_library(None)
     assert not panel.file_button.isEnabled()
+    panel.close()
+
+
+def test_attributes_autosave_without_resetting_editor_or_changing_other_characters(tmp_path):
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtWidgets import QPushButton
+    from prose_to_video.models.visual_reference import VisualEntity
+
+    app = QApplication.instance() or QApplication([])
+    library = VisualLibrary(create_project(tmp_path, 'Automatic saving').root)
+    for name, appearance in [('Ada', 'Black hair'), ('Mara', 'Red hair')]:
+        library.save_entity(VisualEntity(name=name, entity_type='Character',
+            character_paragraphs=[1, 2], appearance_description=appearance))
+    panel = CharactersPanel()
+    audit_before = library.audit_log()
+    panel.set_library(library)
+    assert library.audit_log() == audit_before
+    assert not any(button.text() == 'Save Visual Attributes' for button in panel.findChildren(QPushButton))
+    selected = panel.current_character()
+    editor = panel.fields['appearance_description']
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.Start)
+    editor.setTextCursor(cursor)
+    editor.insertPlainText('Curly ')
+    reopened = VisualLibrary(library.root)
+    saved = reopened.entity(selected.identifier)
+    assert saved.appearance_description == 'Curly Black hair'
+    assert saved.character_edited_fields == ['appearance_description']
+    assert editor.textCursor().position() == len('Curly ')
+    assert editor.document().isUndoAvailable()
+    editor.undo()
+    assert reopened.entity(selected.identifier).appearance_description == 'Black hair'
+    editor.redo()
+    panel.list_widget.setCurrentRow(1)
+    other = panel.current_character()
+    assert editor.toPlainText() == 'Red hair'
+    assert reopened.entity(other.identifier).character_edited_fields == []
+    editor.clear()
+    panel.list_widget.setCurrentRow(0)
+    assert editor.toPlainText() == 'Curly Black hair'
+    assert reopened.entity(other.identifier).appearance_description == ''
+    audit_after = library.audit_log()
+    panel.refresh()
+    panel.set_library(None)
+    assert library.audit_log() == audit_after
+    panel.set_library(reopened)
+    assert editor.toPlainText() == 'Curly Black hair'
+    panel.close()
+
+
+def test_remove_selected_character(tmp_path):
+    from prose_to_video.models.visual_reference import VisualEntity
+
+    app = QApplication.instance() or QApplication([])
+    library = VisualLibrary(create_project(tmp_path, 'Remove character').root)
+    for name in ('Ada', 'Mara'):
+        library.save_entity(VisualEntity(name=name, entity_type='Character', character_paragraphs=[1, 2]))
+    panel = CharactersPanel()
+    assert not panel.remove_button.isEnabled()
+    panel.set_library(library)
+    panel.list_widget.setCurrentRow(1)
+    selected = panel.current_character()
+    changes = []
+    panel.changed.connect(lambda: changes.append(True))
+    panel.set_busy(True)
+    assert not panel.remove_button.isEnabled()
+    panel._remove_character()
+    assert library.entity(selected.identifier) is not None
+    panel.set_busy(False)
+    panel.remove_button.click()
+    reopened = VisualLibrary(library.root)
+    assert reopened.entity(selected.identifier) is None
+    assert [e.name for e in reopened.entities()] == ['Ada']
+    assert panel.current_character().name == 'Ada'
+    assert changes == [True]
+    panel.remove_button.click()
+    assert reopened.entities() == []
+    assert panel.list_widget.count() == 0
+    assert panel.current_character() is None
+    assert not panel.remove_button.isEnabled()
+    assert not panel.fields['appearance_description'].toPlainText()
     panel.close()
 
 
@@ -134,6 +214,27 @@ def test_generate_button_and_background_import(tmp_path, monkeypatch):
     window._import_character_images(identifier, [path])
     finish()
     assert panel.gallery.count() == 1
+    chosen = tmp_path / 'chosen.png'
+    image.fill(0xffabcdef); image.save(str(chosen))
+    original_bytes = chosen.read_bytes()
+    monkeypatch.setattr('prose_to_video.gui.characters_panel.QFileDialog.getOpenFileName',
+                        lambda *args: (str(chosen), 'Images (*.png)'))
+    panel.file_button.click()
+    finish()
+    assert panel.gallery.count() == 2
+    from PySide6.QtCore import Qt
+    saved_path = session.root / panel.gallery.currentItem().data(Qt.UserRole)
+    assert saved_path.parent == session.root / 'references'
+    assert saved_path.read_bytes() == original_bytes
+    assert str(saved_path.parent) in panel.status.text()
+    chosen.unlink()
+    reopened = VisualLibrary(session.root)
+    assert any(reopened.asset(ref.asset_id).path == str(saved_path.relative_to(session.root))
+               for ref in reopened.references(identifier))
+    assert saved_path.read_bytes() == original_bytes
+    panel.set_library(reopened)
+    panel.gallery.setCurrentRow(1)
+    assert not panel.preview.pixmap().isNull()
     window.close()
 
 
@@ -284,3 +385,101 @@ def test_pronoun_resolution_retries_keep_original_ids(tmp_path):
     result = detect_characters('Mara enters.\n\nShe sits.', library, provider, AISettings())
     assert result[0].character_paragraphs == [1, 2]
     assert provider.calls == 3
+
+
+def test_generate_selected_image_button_saves_edits_and_refreshes_gallery(tmp_path, monkeypatch):
+    import time
+    from PySide6.QtCore import QSettings
+    from prose_to_video.gui import main_window
+    from prose_to_video.models.image_job import ProviderResult, ProviderImage
+    from prose_to_video.models.visual_reference import VisualEntity
+    monkeypatch.setattr(main_window, 'QSettings', lambda *args: QSettings(str(tmp_path / 'ui.ini'), QSettings.IniFormat))
+    app = QApplication.instance() or QApplication([])
+    session = create_project(tmp_path, 'Generate reference')
+    library = VisualLibrary(session.root)
+    for name in ('Ada', 'Mara'):
+        library.save_entity(VisualEntity(name=name, entity_type='Character', character_paragraphs=[1, 2]))
+    path = tmp_path / 'generated.png'
+    image = QImage(32, 48, QImage.Format_RGB32); image.fill(0xff5533); image.save(str(path))
+    requests = []
+    class Images:
+        def validate(self, request): pass
+        def submit(self, request):
+            requests.append(request)
+            return ProviderResult(status='Completed', images=[ProviderImage(data=path.read_bytes(), model='fake')])
+    monkeypatch.setattr(main_window, 'make_image_provider', lambda *args: Images())
+    errors = []
+    window = main_window.MainWindow()
+    monkeypatch.setattr(window, '_show_error', lambda *args: errors.append(args))
+    window._set_session(session, load_prose=False)
+    panel = window.characters_panel
+    panel.list_widget.setCurrentRow(1)
+    selected = panel.current_character()
+    panel.fields['clothing_accessories'].setPlainText('Tall blue hat')
+    panel.generate_image_button.click()
+    assert not panel.generate_image_button.isEnabled()
+    deadline = time.monotonic() + 5
+    while window._task is not None and time.monotonic() < deadline:
+        app.processEvents(); time.sleep(.01)
+    assert window._task is None and not errors
+    assert len(requests) == 1 and selected.name in requests[0].prompt
+    assert 'Tall blue hat' in requests[0].prompt
+    assert library.entity(selected.identifier).clothing_accessories == 'Tall blue hat'
+    assert len(library.references(selected.identifier)) == 1
+    other = next(e for e in library.entities('Character') if e.identifier != selected.identifier)
+    assert not library.references(other.identifier)
+    assert panel.gallery.count() == 1 and not panel.preview.pixmap().isNull()
+    assert 'generated' in panel.status.text() and panel.generate_image_button.isEnabled()
+    panel.set_library(None)
+    assert not panel.generate_image_button.isEnabled()
+    window.close()
+
+
+def test_delete_displayed_reference_preserves_other_images_and_edits(tmp_path):
+    from PySide6.QtCore import Qt
+    from prose_to_video.models.visual_reference import VisualEntity
+
+    app = QApplication.instance() or QApplication([])
+    library = VisualLibrary(create_project(tmp_path, 'Delete reference').root)
+    character = library.save_entity(VisualEntity(
+        name='Mara', entity_type='Character', character_paragraphs=[1, 2]))
+    other = library.save_entity(VisualEntity(
+        name='Ada', entity_type='Character', character_paragraphs=[1, 2]))
+    assets = []
+    for index, color in enumerate((0xff112233, 0xff445566, 0xff778899)):
+        path = tmp_path / f'reference-{index}.png'
+        image = QImage(32, 48, QImage.Format_RGB32)
+        image.fill(color)
+        image.save(str(path))
+        asset = library.import_image(path)
+        assets.append(asset)
+        library.attach_image(EntityReference(entity_id=character.identifier, asset_id=asset.identifier))
+    panel = CharactersPanel()
+    panel.set_library(library)
+    panel.list_widget.setCurrentRow(next(i for i, e in enumerate(panel.characters) if e.identifier == character.identifier))
+    panel.gallery.setCurrentRow(1)
+    deleted_id = panel.gallery.currentItem().data(Qt.UserRole + 1)
+    library.attach_image(EntityReference(entity_id=other.identifier, asset_id=deleted_id))
+    panel.fields['appearance_description'].setPlainText('Unsaved details')
+    panel.set_busy(True)
+    assert not panel.delete_reference.isEnabled()
+    panel._delete_reference()
+    assert len(library.references(character.identifier)) == 3
+    panel.set_busy(False)
+    panel.delete_reference.click()
+    reopened = VisualLibrary(library.root)
+    assert {r.asset_id for r in reopened.references(character.identifier)} == {a.identifier for a in assets} - {deleted_id}
+    assert reopened.references(other.identifier)[0].asset_id == deleted_id
+    assert (library.root / library.asset(deleted_id).path).exists()
+    assert panel.fields['appearance_description'].toPlainText() == 'Unsaved details'
+    assert panel.gallery.count() == 2
+    assert not panel.preview.pixmap().isNull()
+    assert not panel.reference_navigation.isHidden()
+    panel.gallery.setCurrentRow(1)
+    panel.delete_reference.click()
+    assert panel.gallery.count() == 1 and panel.gallery.currentRow() == 0
+    assert panel.reference_navigation.isHidden()
+    assert not panel.delete_reference.isEnabled()
+    panel._delete_reference()
+    assert len(reopened.references(character.identifier)) == 1
+    panel.close()

@@ -153,7 +153,8 @@ def test_mock_detection_gui_workflow(tmp_path: Path, monkeypatch) -> None:
     assert len(window.scenes_panel.scenes) == 2
     window.scenes_panel.fields["summary"].setPlainText("Reviewed summary")
     window._save_scene()
-    assert window.scenes_panel.scenes[0].review_status == "Manually edited"
+    assert "review_status" not in window.scenes_panel.scenes[0].model_dump()
+    assert window.scenes_panel.list_widget.item(0).text() == "1. Detected — Setting unspecified"
     assert open_project(session.root).database.load_scenes()[1][0].summary == "Reviewed summary"
     window.close()
 
@@ -226,7 +227,7 @@ def test_places_tab_detects_shared_settings_and_opens_scene(tmp_path: Path, monk
     assert window.workspace_tabs.tabText(0) == 'Start'
     assert window.workspace_tabs.tabText(1) == 'Places'
     assert window.workspace_tabs.tabText(2) == 'Characters'
-    assert window.workspace_tabs.tabText(3) == 'Scenes'
+    assert window.workspace_tabs.tabText(4) == 'Scenes'
     panel = window.places_panel
     assert panel.list_widget.count() == 1
     assert panel.scene_list.count() == 2

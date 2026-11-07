@@ -120,19 +120,20 @@ def test_reference_preparations_survive_reopening_and_gui_selection(tmp_path):
     import os
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     from PySide6.QtWidgets import QApplication
-    from prose_to_video.gui.visual_library_panel import VisualLibraryPanel
+    from prose_to_video.gui.characters_panel import CharactersPanel
     library, entity = setup(tmp_path)
     prepare_character_references(library)
     app = QApplication.instance() or QApplication([])
-    panel = VisualLibraryPanel()
+    entity.character_paragraphs = [0, 1]
+    library.save_entity(entity)
+    panel = CharactersPanel()
     panel.set_library(VisualLibrary(library.root))
-    assert panel.current_id == entity.identifier
+    assert panel.current_character().identifier == entity.identifier
     assert panel.reference_prompts.count() == 2
     received = []
     panel.generate_reference_requested.connect(received.append)
     panel.generate_reference_button.click()
     assert received and received[0] in {r['identifier'] for r in ReferenceStore(library).records()}
-    if panel._integrity_task: panel._integrity_task.wait()
     app.processEvents(); panel.close()
 
 
@@ -144,3 +145,45 @@ def test_start_styles_in_character_reference_prompts(tmp_path):
     styled = prepare_character_references(library)
     assert all('Fine ink lines on cream paper' in record['prompt'] for record in styled)
     assert {r['fingerprint'] for r in original}.isdisjoint(r['fingerprint'] for r in styled)
+
+
+def test_selected_reference_uses_current_attributes_and_portrait_headroom(tmp_path):
+    from prose_to_video.pipeline.character_references import generate_selected_character_reference
+    library, entity = setup(tmp_path)
+    entity.appearance_description = 'Curly auburn hair'
+    entity.clothing_accessories = 'Tall green hat'
+    library.save_entity(entity)
+    provider = FakeImages(tmp_path)
+    requests = []
+    original = provider.submit
+    def submit(request):
+        requests.append(request)
+        return original(request)
+    provider.submit = submit
+    settings = ImageGenerationSettings(width=1536, height=864)
+    for _ in range(2):
+        result = generate_selected_character_reference(library, entity.identifier, settings, provider)
+        assert result['status'] == 'Completed'
+    assert provider.calls == 2
+    assert len(ReferenceStore(library).records()) == 2
+    request = requests[0]
+    assert (request.width, request.height) == (1024, 1536)
+    assert (settings.width, settings.height) == (1536, 864)
+    assert 'Curly auburn hair' in request.prompt and 'Tall green hat' in request.prompt
+    assert 'white hair' not in request.prompt and 'black hair' not in request.prompt
+    assert '10 percent' in request.prompt and 'headroom' in request.prompt
+    assert 'Never crop the head' in request.prompt
+    assert library.references(entity.identifier)[0].variant_id is None
+
+
+def test_selected_reference_blocks_uncertain_request_even_after_edits(tmp_path):
+    from prose_to_video.pipeline.character_references import generate_selected_character_reference
+    library, entity = setup(tmp_path)
+    provider = FakeImages(tmp_path)
+    provider.result = ProviderResult(status='Running', provider_job_id='pending')
+    generate_selected_character_reference(library, entity.identifier, ImageGenerationSettings(), provider)
+    entity.clothing_accessories = 'New hat'
+    library.save_entity(entity)
+    with pytest.raises(ValueError, match='unresolved'):
+        generate_selected_character_reference(library, entity.identifier, ImageGenerationSettings(), provider)
+    assert provider.calls == 1

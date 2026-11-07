@@ -417,8 +417,8 @@ class ProjectDatabase:
         end = max(neighbor.end, scenes[index].end)
         scenes[target] = neighbor.model_copy(update={
             "start": start, "end": end, "text": text[start:end], "summary": "",
+            "visual_description": "", "render_type": "cinematic",
             "actions": [], "boundary_reason": "Scene deleted; review description",
-            "review_status": "Not reviewed",
         })
         scenes.pop(index)
         self.replace_scenes(text, [s.model_copy(update={"sequence": i}) for i, s in enumerate(scenes, 1)])

@@ -245,13 +245,14 @@ class SceneTask(QThread):
     failed = Signal(str)
     progress = Signal(str, int, int)
 
-    def __init__(self, path: Path, provider, settings, parent=None, sections=None, expected_hash=None):
+    def __init__(self, path: Path, provider, settings, parent=None, sections=None, expected_hash=None, library=None):
         super().__init__(parent)
         self.path = path
         self.provider = provider
         self.settings = settings
         self.sections = sections
         self.expected_hash = expected_hash
+        self.library = library
         self.cancel_event = Event()
 
     def run(self) -> None:
@@ -261,7 +262,7 @@ class SceneTask(QThread):
                 raise ValueError("The prose changed after manuscript review. Reload it before scene detection.")
             scenes = detect_scenes(text, self.provider, self.settings, self.cancel_event,
                                    lambda stage, current, total: self.progress.emit(stage, current, total),
-                                   sections=self.sections)
+                                   sections=self.sections, library=self.library)
             if self.cancel_event.is_set():
                 raise AnalysisCanceled()
             if source_hash(read_prose(self.path)) != source_hash(text):
@@ -534,9 +535,9 @@ class MainWindow(QMainWindow):
         self.workspace_tabs.addTab(scroll, "Start")
         self.workspace_tabs.addTab(self.places_panel, "Places")
         self.workspace_tabs.addTab(self.characters_panel, "Characters")
+        self.workspace_tabs.addTab(self.visual_library_panel, "Visual Library")
         self.workspace_tabs.addTab(self.scenes_panel, "Scenes")
         self.workspace_tabs.addTab(self.storyboard_panel, "Storyboard")
-        self.workspace_tabs.addTab(self.visual_library_panel, "Visual Library")
         self.workspace_tabs.addTab(self.manuscript_panel, "Manuscript")
         self.workspace_tabs.addTab(self.image_prompt_panel, "Image Prompts")
         self.workspace_tabs.addTab(self.image_gallery_panel, "Image Gallery")
@@ -565,22 +566,25 @@ class MainWindow(QMainWindow):
         self.image_gallery_panel.details_requested.connect(self._image_details)
         self.image_gallery_panel.compare_requested.connect(self._compare_images)
         self.image_gallery_panel.recovery_requested.connect(self._recover_image_jobs)
-        self.visual_library_panel.prepare_references_requested.connect(self._prepare_character_references)
-        self.visual_library_panel.generate_reference_requested.connect(self._generate_character_reference)
+        self.characters_panel.prepare_references_requested.connect(self._prepare_character_references)
+        self.characters_panel.generate_reference_requested.connect(self._generate_character_reference)
         self.visual_library_panel.extract_requested.connect(self._extract_entities)
         self.visual_library_panel.cancel_requested.connect(self._cancel_entity_extraction)
         self.visual_library_panel.changed.connect(self._visuals_changed)
         self.characters_panel.generate_requested.connect(self._generate_characters)
         self.characters_panel.cancel_requested.connect(self._cancel_characters)
+        self.characters_panel.generate_image_requested.connect(self._generate_selected_character_image)
         self.characters_panel.import_requested.connect(self._import_character_images)
         self.characters_panel.changed.connect(self.visual_library_panel.refresh)
         self.characters_panel.changed.connect(self._refresh_shot_visuals)
+        self.characters_panel.changed.connect(self._refresh_scene_references)
         self.characters_panel.error.connect(lambda message: self._show_error('Characters', message))
         self.places_panel.detect_requested.connect(self._detect_places)
         self.places_panel.cancel_requested.connect(self._cancel_places)
         self.places_panel.scene_requested.connect(self._open_place_scene)
         self.places_panel.changed.connect(self.visual_library_panel.refresh)
         self.places_panel.changed.connect(self._refresh_shot_visuals)
+        self.places_panel.changed.connect(self._refresh_scene_references)
         self.places_panel.error.connect(lambda message: self._show_error('Could not save place', message))
         self.visual_library_panel.style_override_requested.connect(self._visual_style_override)
         horizontal.addWidget(self.workspace_tabs)
@@ -654,8 +658,6 @@ class MainWindow(QMainWindow):
         self.import_prose_button.setEnabled(session is not None and not busy)
         self.import_audio_button.setEnabled(session is not None and not busy)
         self.styles_panel.setEnabled(session is not None and not busy)
-        self.visual_library_panel.prepare_references_button.setEnabled(session is not None and not busy)
-        self.visual_library_panel.generate_reference_button.setEnabled(session is not None and not busy)
         self.characters_panel.set_busy(busy, bool(session and session.file_status()[0]), isinstance(self._task, CharacterTask))
         self.places_panel.busy = busy
         self.places_panel.detect_button.setEnabled(bool(session and session.file_status()[0]) and not busy)
@@ -763,6 +765,7 @@ class MainWindow(QMainWindow):
         self._highlighted_span = None
         self.scenes_panel.set_alignment(None)
         self.scenes_panel.set_scenes([])
+        self.scenes_panel.set_references({})
         self.manuscript_panel.bind(session.database if session else None)
         self.prose_viewer.clear_story()
         self._refresh()
@@ -826,6 +829,7 @@ class MainWindow(QMainWindow):
                 link_places(self.places_panel.library)
                 self.visual_library_panel.refresh()
             self.places_panel.refresh()
+            self._refresh_scene_references()
             if self._alignment:
                 self._load_current_alignment()
         except ProjectDatabaseError as exc:
@@ -1167,7 +1171,8 @@ class MainWindow(QMainWindow):
                 return
         task = SceneTask(path, provider, settings, self,
                          sections=self.manuscript_panel.sections,
-                         expected_hash=source_hash(self._source_text))
+                         expected_hash=source_hash(self._source_text),
+                         library=VisualLibrary(self.session.root))
         self._scene_task = task
         task.progress.connect(self.scenes_panel.set_progress)
         task.succeeded.connect(self._scene_analysis_ready)
@@ -1576,6 +1581,7 @@ class MainWindow(QMainWindow):
     def _characters_ready(self, characters):
         self.characters_panel.refresh()
         self.visual_library_panel.refresh()
+        self._refresh_scene_references()
         self.characters_panel.status.setText(
             f'{len(characters)} recurring characters found, including resolved pronoun appearances. Review visible attributes and choose reference images.'
             if characters else 'No recurring characters could be resolved. A character must participate in at least two paragraphs, including unambiguous pronoun references.')
@@ -1585,26 +1591,65 @@ class MainWindow(QMainWindow):
             self._task.cancel_event.set()
             self.characters_panel.status.setText('Canceling after the current AI request…')
 
+    def _generate_selected_character_image(self, identifier):
+        if not self.session or self._task or self._entity_task or self._image_task:
+            return
+        from prose_to_video.pipeline.character_references import generate_selected_character_reference
+        library = self.characters_panel.library
+        try:
+            settings = ImageStore(self.session.root).settings()
+            provider = make_image_provider(settings, self.session.root)
+            character = library.entity(identifier)
+            if character is None:
+                return
+            self.characters_panel.status.setText(f'Generating reference image for {character.name}…')
+            def ready(result):
+                self._character_references_ready('Reference request: ' + result['status'])
+                self.characters_panel.status.setText(
+                    f'Reference image generated for {character.name}.' if result['status'] == 'Completed'
+                    else f'Reference for {character.name}: {result["status"]}. Use Review / Generate Reference for recovery.')
+                selected = self.characters_panel.current_character()
+                asset = library.asset(result['asset_ids'][-1]) if result['asset_ids'] else None
+                if selected and selected.identifier == identifier and asset:
+                    for row in range(self.characters_panel.gallery.count()):
+                        if self.characters_panel.gallery.item(row).data(Qt.UserRole) == asset.path:
+                            self.characters_panel.gallery.setCurrentRow(row)
+                            break
+            self._start_task(lambda: generate_selected_character_reference(library, identifier, settings, provider),
+                             ready, 'Character reference generation')
+            self._task.failed.connect(lambda message: self.characters_panel.status.setText('Reference generation failed: ' + message))
+        except Exception as exc:
+            self.characters_panel.status.setText('Reference generation failed: ' + str(exc))
+            self._show_error('Character reference generation', str(exc))
+
     def _import_character_images(self, identifier, paths):
         if not self.session or self._task: return
         library = self.characters_panel.library
         def work():
-            imported, failures = 0, []
+            imported, failures = [], []
             for path in paths:
                 try:
                     asset = library.import_image(path)
                     if not any(r.asset_id == asset.identifier for r in library.references(identifier)):
                         library.attach_image(EntityReference(entity_id=identifier, asset_id=asset.identifier,
                             description=path.name, is_primary=not library.references(identifier)))
-                    imported += 1
+                    imported.append(asset)
                 except (ValueError, OSError, ProjectDatabaseError) as exc:
                     failures.append(f'{path.name}: {exc}')
             return imported, failures
         def ready(result):
             self.characters_panel.refresh()
             self.visual_library_panel.refresh()
-            count, failures = result
-            self.characters_panel.status.setText(f'{count} reference image(s) imported. ' + '; '.join(failures))
+            imported, failures = result
+            selected = self.characters_panel.current_character()
+            if imported and selected and selected.identifier == identifier:
+                for row in range(self.characters_panel.gallery.count()):
+                    if self.characters_panel.gallery.item(row).data(Qt.UserRole) == imported[-1].path:
+                        self.characters_panel.gallery.setCurrentRow(row)
+                        break
+            self.characters_panel.status.setText(
+                f'{len(imported)} reference image(s) saved to {library.root / "references"}. '
+                + '; '.join(failures))
         self._start_task(work, ready, 'Character reference images')
 
     def _detect_places(self):
@@ -1631,6 +1676,7 @@ class MainWindow(QMainWindow):
     def _places_ready(self, places):
         self.places_panel.refresh()
         self.visual_library_panel.refresh()
+        self._refresh_scene_references()
         self.places_panel.status.setText(f'{len(places)} places listed in prose order, described, and linked to available scenes.')
 
     def _cancel_places(self):
@@ -1648,7 +1694,16 @@ class MainWindow(QMainWindow):
     def _visuals_changed(self):
         self.characters_panel.refresh()
         self.places_panel.refresh()
+        self._refresh_scene_references()
         self._refresh_shot_visuals()
+
+    def _refresh_scene_references(self):
+        from prose_to_video.pipeline.scene_references import scene_references
+
+        references = scene_references(
+            self.characters_panel.library, self._source_text, self.scenes_panel.scenes
+        ) if self.session and not self.scenes_panel.outdated else {}
+        self.scenes_panel.set_references(references)
 
     def _visual_style_override(self, scope, style):
         if not self.session: return
@@ -1671,7 +1726,7 @@ class MainWindow(QMainWindow):
 
     def _character_references_ready(self, message):
         self.visual_library_panel.refresh()
-        self.visual_library_panel.status.setText(message)
+        self.characters_panel.status.setText(message)
         self._visuals_changed()
 
     def _generate_character_reference(self, identifier):
@@ -1758,6 +1813,7 @@ class MainWindow(QMainWindow):
         if not self.session: return
         self.visual_library_panel.refresh()
         self.places_panel.refresh()
+        self._refresh_scene_references()
         self.visual_library_panel.status.setText(f'Extracted entities; {len(created)} new suggestion(s)')
 
     def _entity_finished(self):

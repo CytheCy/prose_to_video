@@ -51,7 +51,7 @@ def _suggest_age_variants(library, entity, evidence):
         for age, items in sorted(groups.items())]
 
 
-def prepare_character_references(library, entity_ids=None):
+def prepare_character_references(library, entity_ids=None, *, current_attributes=False):
     """Local preparation is automatic and free; it never approves designs or images."""
     store = ReferenceStore(library)
     prepared = []
@@ -65,7 +65,7 @@ def prepare_character_references(library, entity_ids=None):
         # User-edited canonical fields supersede their historical evidence values.
         evidence = [e for e in evidence if not (e.kind == 'user' and not e.scene_id
                     and hasattr(entity, e.field) and getattr(entity, e.field) != e.value)]
-        variants = _suggest_age_variants(library, entity, evidence)
+        variants = [] if current_attributes else _suggest_age_variants(library, entity, evidence)
         variants = [v for v in variants if v.status != 'Rejected']
         targets = variants or [None]
         for variant in targets:
@@ -76,6 +76,11 @@ def prepare_character_references(library, entity_ids=None):
             # Different scene descriptions stay separate when no variant covers them.
             # They remain suggestions, never promoted to canonical appearance.
             details = list(dict.fromkeys(f'{e.field}: {e.value}' for e in selected))
+            if current_attributes:
+                from prose_to_video.pipeline.entity_extraction import APPEARANCE_FIELDS
+                selected = []
+                details = [f'{field}: {getattr(entity, field)}' for field in sorted(APPEARANCE_FIELDS)
+                           if getattr(entity, field)]
             warnings = []
             if not details: warnings.append('No grounded appearance details; review the proposed design before use.')
             if variant and variant.status != 'Approved': warnings.append('Appearance variant needs approval before use in storyboard shots.')
@@ -88,23 +93,53 @@ def prepare_character_references(library, entity_ids=None):
                     details.append(f'Age range: {variant.age_min if variant.age_min is not None else "unspecified"} to {variant.age_max if variant.age_max is not None else "unspecified"}')
             style = library.prompt_style_values(library.style())
             prompt = (f'Character identity reference for {entity.name}. One person only, full body standing, '
-                      'face clearly visible, neutral pose, uncluttered background, even readable lighting. '
+                      'centered and facing the camera, face clearly visible, neutral expression and relaxed pose, '
+                      'plain solid white blank background, even readable lighting. '
+                      'No scenery, environment, background objects, patterns, textures, gradients or horizon line. '
+                      'Pull the camera back: show the entire figure from the top of the hair or headwear to the soles of both feet. '
+                      'Keep at least 10 percent of the image height as empty headroom above the highest point of the head, '
+                      'hair or headwear, and leave clear space below the feet and beside the hands. '
+                      'The figure must fit entirely within the central 80 percent of the canvas height. '
+                      'Never crop the head, hair, headwear, hands or feet; no close-up or tight portrait crop. '
                       'Preserve the supplied identity and the selected age and clothing; do not blend life stages. '
                       'No story action, extra people, captions or collage. Unknown appearance is an unapproved visual proposal. '
                       + ' '.join(d for d in details if d) + '\nVisual style: '
-                      + ('; '.join(v for v in style.values() if v) or 'Neutral illustration'))
+                      + ('; '.join(v for v in style.values() if v) or 'Neutral illustration')
+                      + '\nApply the visual style to the character only; keep the background blank and solid white.')
             inputs = {'entity': entity.model_dump(mode='json'), 'variant': variant.model_dump(mode='json') if variant else None,
-                      'evidence': [e.model_dump(mode='json') for e in selected], 'style': style, 'prompt': prompt}
+                      'evidence': [e.model_dump(mode='json') for e in selected], 'style': style, 'prompt': prompt,
+                      'current_attributes': current_attributes}
             digest = fingerprint(inputs)
             old = next((r for r in store.records(entity.identifier) if r['fingerprint'] == digest), None)
             record = old or {'identifier': str(uuid4()), 'entity_id': entity.identifier,
-                'variant_id': variant.identifier if variant else None,
+                'variant_id': variant.identifier if variant else None, 'current_attributes': current_attributes,
                 'label': f'{entity.name} — {variant.name if variant else "Default appearance"}',
                 'prompt': prompt, 'fingerprint': digest, 'warnings': warnings,
                 'evidence_ids': [e.identifier for e in selected], 'status': 'Prepared', 'asset_ids': []}
             if old is None: store.save(record)
             prepared.append(record)
     return prepared
+
+
+def generate_selected_character_reference(library, entity_id, settings, provider):
+    """Generate one current-appearance reference; block unresolved requests from resubmission."""
+    records = prepare_character_references(library, {entity_id}, current_attributes=True)
+    if not records:
+        raise ValueError('Selected character is missing or rejected')
+    record = records[0]
+    store = ReferenceStore(library)
+    matching = [r for r in store.records(entity_id) if r.get('current_attributes')]
+    pending = next((r for r in matching if r['status'] in {'Submitted', 'Needs Reconciliation'}), None)
+    if pending:
+        raise ValueError('A reference request for this character is unresolved. Reconcile it in the Visual Library before generating again.')
+    if record['status'] != 'Prepared':
+        record = {**record, 'identifier': str(uuid4()), 'status': 'Prepared', 'asset_ids': []}
+        for key in ('settings', 'estimated_cost', 'actual_cost', 'usage', 'provider_job_id', 'error'):
+            record.pop(key, None)
+        store.save(record)
+    # Reference framing is independent of the storyboard's landscape output settings.
+    settings = settings.model_copy(update={'width': 1024, 'height': 1536, 'candidates': 1})
+    return generate_character_reference(library, record['identifier'], settings, provider)
 
 
 def reference_spending(library):
@@ -125,7 +160,8 @@ def generate_character_reference(library, identifier, settings, provider, *, pro
     record = next((r for r in store.records() if r['identifier'] == identifier), None)
     if not record or record['status'] != 'Prepared':
         raise ValueError('Reference is already submitted or generated; inspect its saved status before another request')
-    current = prepare_character_references(library, {record['entity_id']})
+    current = prepare_character_references(library, {record['entity_id']},
+                                           current_attributes=record.get('current_attributes', False))
     if not any(r['fingerprint'] == record['fingerprint'] for r in current):
         raise ValueError('Character details or style changed; prepare references again')
     if prompt is not None:

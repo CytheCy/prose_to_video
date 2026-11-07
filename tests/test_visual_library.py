@@ -191,6 +191,7 @@ def test_transaction_rollback_and_continuity(tmp_path):
 def test_gui_selection_and_preview(tmp_path):
     app = QApplication.instance() or QApplication([])
     _, library, scene, _, _ = setup(tmp_path)
+    character = library.save_entity(VisualEntity(name='Jeff', entity_type='Character'))
     entity = library.save_entity(VisualEntity(name='Robot', entity_type='Robot'))
     library.relate_scene(entity.identifier, scene.identifier)
     source = tmp_path / 'robot.png'; picture(source)
@@ -199,6 +200,9 @@ def test_gui_selection_and_preview(tmp_path):
     panel = VisualLibraryPanel(); panel.set_library(library); panel.show(); app.processEvents()
     assert panel.entities.count() == 1
     assert panel.current_id == entity.identifier
+    assert panel.type_filter.findText('Character') == -1
+    assert panel.entity_type.findText('Character') == -1
+    assert library.entity(character.identifier) is not None
     assert panel.gallery.count() == 1
     assert panel.preview.pixmap() and not panel.preview.pixmap().isNull()
     panel.search.setText('missing'); app.processEvents(); assert panel.entities.count() == 0
@@ -342,9 +346,10 @@ def test_gui_mock_extraction_and_storyboard_reference(tmp_path, monkeypatch):
     while window._entity_task is not None and time.monotonic() < deadline:
         app.processEvents(); time.sleep(.01)
     assert window._entity_task is None
-    assert window.visual_library_panel.entities.count() == 1
+    assert window.visual_library_panel.entities.count() == 0
+    assert len(VisualLibrary(session.root).entities("Character")) == 1
     assert window.workspace_tabs.tabText(1) == 'Places'
-    assert window.workspace_tabs.tabText(5) == 'Visual Library'
+    assert window.workspace_tabs.tabText(3) == 'Visual Library'
     window.close()
 
 
