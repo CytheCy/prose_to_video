@@ -5,16 +5,16 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from prose_to_video.pipeline.speech_normalization import comparison_key
+
+MATCHING_VERSION = 2
 
 from prose_to_video.models.alignment import (AlignmentIssue, SceneTiming, SpanAlignment,
                                              TextPassage, TranscriptWord, WordAlignment)
 from prose_to_video.models.scene import Scene
-_MATCH_TOKEN_RE = re.compile(r"\b(?:[A-Za-z]\.){2,}|\b\w+(?:['’]\w+)*\b", re.UNICODE)
+_MATCH_TOKEN_RE = re.compile(r"\b(?:[A-Za-z]\.){2,}|\b\d+(?:,\d{3})*(?:\.\d+)?\b|\b[\w\u0300-\u036f]+(?:['’][\w\u0300-\u036f]+)*(?![\w\u0300-\u036f])", re.UNICODE)
 _SPELLED_YEAR_RE = re.compile(r"\btwenty[- ](?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?\b", re.I)
-_YEAR_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
-              "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
-_YEAR_ONES = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-              "six": 6, "seven": 7, "eight": 8, "nine": 9}
+
 
 
 @dataclass(frozen=True)
@@ -24,17 +24,9 @@ class Token:
     end: int
 
 
-_NUMBERS = {"zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
-            "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10"}
-
-
 def normalize(word: str) -> str:
-    if _SPELLED_YEAR_RE.fullmatch(word):
-        parts = re.split(r"[- ]", word.casefold())
-        return str(2000 + _YEAR_TENS[parts[1]] + (_YEAR_ONES.get(parts[2], 0) if len(parts) > 2 else 0))
-    value = word.casefold().replace("’", "'").replace("_", "")
-    value = re.sub(r"[^\w']", "", value, flags=re.UNICODE).replace("'", "")
-    return _NUMBERS.get(value, value)
+    """Public comparison helper; matching keeps numeric boundaries internally."""
+    return comparison_key(word).replace('#', '')
 
 
 def manuscript_tokens(text: str, *, combine_years: bool = False) -> list[Token]:
@@ -126,68 +118,101 @@ def _align_gap(a: list[str], b: list[str]) -> list[tuple[int, int]]:
     return result[::-1]
 
 
+def _group_matches(source, spoken, text, boundaries):
+    """Bounded phrase alignment. Joined words share a single verified phrase range."""
+    a = [comparison_key(t.text) for t in source]
+    b = [comparison_key(w.text) for w in spoken]
+    def keys(items, manuscript=False):
+        result = {}
+        for i in range(len(items)):
+            for size in range(1, min(8, len(items)-i)+1):
+                if manuscript:
+                    first, last = items[i], items[i+size-1]
+                    if any(first.start < cut < last.end for cut in boundaries):
+                        break
+                    if size > 1:
+                        gap = text[items[i+size-2].end:last.start]
+                        if not re.fullmatch(r"[ \t\-’']*", gap):
+                            break
+                    value = text[first.start:last.end]
+                else:
+                    if size > 1 and re.search(r'[.!?,;:]', items[i+size-2].text.rstrip('.')):
+                        break
+                    value = ' '.join(w.text for w in items[i:i+size])
+                result[i, size] = comparison_key(value)
+        return result
+    ak, bk = keys(source, True), keys(spoken)
+    sizes = [(1,1), *[(v,1) for v in range(2,9)], *[(1,v) for v in range(2,9)]]
+    def gap(ai, aj, bi, bj):
+        n, m = aj-ai, bj-bi
+        if not n or not m:
+            return []
+        if n*m > 600_000 or max(n,m) > 1500:
+            return [(ai+i, ai+i+1, bi+j, bi+j+1) for i,j in _align_gap(a[ai:aj], b[bi:bj])]
+        scores = [[0]*(m+1) for _ in range(n+1)]
+        directions = {}
+        for i in range(n+1):
+            for j in range(m+1):
+                if i: scores[i][j] = scores[i-1][j]-1; directions[i,j] = (1,0)
+                if j and (not i or scores[i][j-1]-1 > scores[i][j]):
+                    scores[i][j] = scores[i][j-1]-1; directions[i,j] = (0,1)
+                for x,y in sizes:
+                    if x > i or y > j: continue
+                    key = ak.get((ai+i-x,x))
+                    if not key or key != bk.get((bi+j-y,y)): continue
+                    value = scores[i-x][j-y] + x+y
+                    if value > scores[i][j]:
+                        scores[i][j] = value; directions[i,j] = (x,y)
+        result=[]; i,j=n,m
+        while i or j:
+            x,y=directions[i,j]
+            if x and y: result.append((ai+i-x,ai+i,bi+j-y,bi+j))
+            i-=x; j-=y
+        return result[::-1]
+    result=[]; ai=bi=0
+    for aj,bj in [*_anchors(a,b), (len(a),len(b))]:
+        result.extend(gap(ai,aj,bi,bj))
+        if (aj,bj)!=(len(a),len(b)):
+            result.extend((aj+d,aj+d+1,bj+d,bj+d+1) for d in range(4))
+        ai,bi=aj+4,bj+4
+    return result
+
+
 def match_words(text: str, spoken: list[TranscriptWord],
-                included: list[tuple[int, int]] | None = None) -> tuple[list[WordAlignment], list[TextPassage], list[AlignmentIssue]]:
-    source = manuscript_tokens(text, combine_years=any(re.fullmatch(r"(?:19|20|21)\d{2}", normalize(w.text))
-                                                      for w in spoken))
-    eligible = [i for i, token in enumerate(source) if included is None or any(
-        start <= token.start and token.end <= end for start, end in included)]
-    eligible_index = {source_index: filtered_index for filtered_index, source_index in enumerate(eligible)}
-    a = [normalize(source[i].text) for i in eligible]
-    b = [normalize(word.text) for word in spoken]
-    pairs: dict[int, int] = {}
-    anchors = _anchors(a, b)
-    ai = bi = 0
-    for aj, bj in [*anchors, (len(a), len(b))]:
-        for left, right in _align_gap(a[ai:aj], b[bi:bj]):
-            pairs[ai + left] = bi + right
-        if (aj, bj) != (len(a), len(b)):
-            for d in range(4):
-                pairs[aj + d] = bj + d
-        ai, bi = aj + 4, bj + 4
-    words = []
-    matched_spoken = set()
-    for i, token in enumerate(source):
-        j = pairs.get(eligible_index[i]) if i in eligible_index else None
-        recognized = spoken[j] if j is not None else None
-        timed = (recognized is not None and recognized.start is not None
-                 and recognized.end > recognized.start)
-        if j is not None:
-            matched_spoken.add(j)
-        words.append(WordAlignment(source_start=token.start, source_end=token.end,
-                                   text=token.text, recognized=recognized.text if recognized else None,
-                                   audio_start=recognized.start if timed else None,
-                                   audio_end=recognized.end if timed else None,
-                                   status="matched" if timed else "excluded" if i not in eligible_index else "unmatched",
-                                   confidence=recognized.score if timed else None))
-    # Do not allow a later word to point backward in audio after imperfect ASR.
-    last = 0.0
-    for i, word in enumerate(words):
-        if word.audio_start is not None:
-            if word.audio_start + 0.02 < last:
-                words[i] = word.model_copy(update={"audio_start": None, "audio_end": None,
-                                                   "status": "unmatched"})
-            else:
-                last = max(last, word.audio_end)
-    passages = []
-    items = sorted((eligible[i], j) for i, j in pairs.items())
-    groups: list[list[tuple[int, int]]] = []
-    for item in items:
-        if not groups or item[0] != groups[-1][-1][0] + 1 or item[1] != groups[-1][-1][1] + 1:
-            groups.append([])
-        groups[-1].append(item)
-    for group in groups:
-        first, last_pair = group[0], group[-1]
-        passages.append(TextPassage(source_start=source[first[0]].start,
-                                    source_end=source[last_pair[0]].end,
-                                    transcript_start=first[1], transcript_end=last_pair[1] + 1,
-                                    matched_words=len(group)))
-    issues = []
-    for j, word in enumerate(spoken):
-        if j not in matched_spoken:
-            issues.append(AlignmentIssue(kind="spoken_insertion", message=f"Unmatched speech: {word.text}",
-                                         audio_start=word.start, audio_end=word.end))
-    return words, passages, issues
+                included: list[tuple[int, int]] | None = None,
+                boundaries: list[int] | None = None) -> tuple[list[WordAlignment], list[TextPassage], list[AlignmentIssue]]:
+    source = manuscript_tokens(text)
+    eligible = [t for t in source if included is None or any(a <= t.start and t.end <= b for a,b in included)]
+    cuts = set(boundaries or []) | {p for span in included or [] for p in span}
+    matches = _group_matches(eligible, spoken, text, cuts)
+    by_start = {eligible[a].start: (a,b,c,d) for a,b,c,d in matches}
+    covered=set(); matched_spoken=set(); words=[]; passages=[]
+    eligible_starts={t.start for t in eligible}
+    last=0.0
+    for token in source:
+        if token.start in covered: continue
+        match=by_start.get(token.start)
+        if match:
+            a,b,c,d=match; tokens=eligible[a:b]; recognized=spoken[c:d]
+            covered.update(t.start for t in tokens[1:]); matched_spoken.update(range(c,d))
+            start,end=recognized[0].start,recognized[-1].end
+            timed=all(w.start is not None and w.end > w.start for w in recognized)
+            timed=timed and all(left.end <= right.start+.02 for left,right in zip(recognized,recognized[1:]))
+            timed=timed and start+.02 >= last
+            if timed: last=max(last,end)
+            words.append(WordAlignment(source_start=token.start,source_end=tokens[-1].end,
+                text=text[token.start:tokens[-1].end],recognized=' '.join(w.text for w in recognized),
+                audio_start=start if timed else None,audio_end=end if timed else None,
+                status='matched' if timed else 'unmatched',
+                confidence=min((w.score for w in recognized if w.score is not None),default=None)))
+            passages.append(TextPassage(source_start=token.start,source_end=tokens[-1].end,
+                transcript_start=c,transcript_end=d,matched_words=b-a))
+        else:
+            words.append(WordAlignment(source_start=token.start,source_end=token.end,text=token.text,
+                status='unmatched' if token.start in eligible_starts else 'excluded'))
+    issues=[AlignmentIssue(kind='spoken_insertion',message=f'Unmatched speech: {word.text}',
+        audio_start=word.start,audio_end=word.end) for j,word in enumerate(spoken) if j not in matched_spoken]
+    return words,passages,issues
 
 
 def paragraph_ranges(text: str) -> list[tuple[int, int]]:

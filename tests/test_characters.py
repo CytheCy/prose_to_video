@@ -185,7 +185,7 @@ def test_remove_selected_character(tmp_path):
 def test_generate_button_and_background_import(tmp_path, monkeypatch):
     import time
     from PySide6.QtCore import QSettings
-    from prose_to_video.gui import main_window
+    from prose_to_video.gui import legacy_main_window as main_window
     from prose_to_video.storage.project_files import import_prose
     monkeypatch.setattr(main_window, 'QSettings', lambda *args: QSettings(str(tmp_path / 'settings.ini'), QSettings.IniFormat))
     monkeypatch.setattr(main_window, 'make_provider', lambda settings: Provider())
@@ -390,7 +390,7 @@ def test_pronoun_resolution_retries_keep_original_ids(tmp_path):
 def test_generate_selected_image_button_saves_edits_and_refreshes_gallery(tmp_path, monkeypatch):
     import time
     from PySide6.QtCore import QSettings
-    from prose_to_video.gui import main_window
+    from prose_to_video.gui import legacy_main_window as main_window
     from prose_to_video.models.image_job import ProviderResult, ProviderImage
     from prose_to_video.models.visual_reference import VisualEntity
     monkeypatch.setattr(main_window, 'QSettings', lambda *args: QSettings(str(tmp_path / 'ui.ini'), QSettings.IniFormat))

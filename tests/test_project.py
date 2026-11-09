@@ -55,15 +55,47 @@ def test_prose_import_and_statistics(tmp_path: Path) -> None:
     assert open_project(session.root).project.prose_word_count == 6
 
 
-def test_duplicate_filename_preserves_project(tmp_path: Path) -> None:
+def test_reimport_prose_reloads_changed_file(tmp_path: Path) -> None:
     source = tmp_path / "story.md"
     source.write_text("Original", encoding="utf-8")
     session = import_prose(create_project(tmp_path, "Story"), source)
-    source.write_text("Changed", encoding="utf-8")
-    with pytest.raises(ProjectError, match="already exists"):
+    source.write_text("Changed prose with more words", encoding="utf-8")
+    session = import_prose(session, source)
+    assert (session.root / "source/story.md").read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    assert open_project(session.root).project.prose_word_count == 5
+    assert session.project.prose_path == "source/story.md"
+
+
+@pytest.mark.parametrize('failure', ['invalid_prose', 'database'])
+def test_failed_prose_reimport_preserves_previous_copy(tmp_path, monkeypatch, failure):
+    source = tmp_path / 'story.txt'
+    source.write_text('Original prose', encoding='utf-8')
+    session = import_prose(create_project(tmp_path, 'Story'), source)
+    if failure == 'invalid_prose':
+        source.write_bytes(b'\xff\xfe')
+    else:
+        source.write_text('Edited story with extra words', encoding='utf-8')
+        def fail_save(self, project):
+            raise ProjectDatabaseError('Disk write failed')
+        monkeypatch.setattr(ProjectDatabase, 'save', fail_save)
+    with pytest.raises(ProjectError):
         import_prose(session, source)
-    assert (session.root / "source/story.md").read_text(encoding="utf-8") == "Original"
-    assert open_project(session.root).project.prose_word_count == 1
+    assert (session.root / 'source/story.txt').read_text(encoding='utf-8') == 'Original prose'
+    assert open_project(session.root).project.prose_word_count == 2
+    assert sorted(p.name for p in (session.root / 'source').iterdir()) == ['story.txt']
+
+
+def test_import_does_not_overwrite_inactive_source(tmp_path):
+    source = tmp_path / 'story.txt'
+    source.write_text('Original prose', encoding='utf-8')
+    session = import_prose(create_project(tmp_path, 'Story'), source)
+    other = tmp_path / 'other.txt'
+    other.write_text('Another story', encoding='utf-8')
+    session = import_prose(session, other)
+    source.write_text('Changed', encoding='utf-8')
+    with pytest.raises(ProjectError, match='already exists'):
+        import_prose(session, source)
+    assert (session.root / 'source/story.txt').read_text(encoding='utf-8') == 'Original prose'
 
 
 @pytest.mark.parametrize("filename,content,error", [

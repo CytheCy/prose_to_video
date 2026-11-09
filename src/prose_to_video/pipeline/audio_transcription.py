@@ -4,7 +4,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import shlex
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,8 +80,17 @@ def dependency_check() -> None:
     from shutil import which
     if not which("ffmpeg") or not which("ffprobe"):
         raise ValueError("FFmpeg and FFprobe are required; install Fedora ffmpeg-free")
-    if not importlib.util.find_spec("torch") or not importlib.util.find_spec("whisperx"):
-        raise ValueError("PyTorch and WhisperX are required. Install the audio optional dependencies; see README.")
+    missing = [name for name in ("torch", "whisperx") if not importlib.util.find_spec(name)]
+    if missing:
+        if sys.version_info >= (3, 14):
+            remedy = "Use a Python 3.12 or 3.13 environment with the audio optional dependencies installed; see README."
+        else:
+            remedy = (f"From the repository root, run: {shlex.quote(sys.executable)} -m pip install -e '.[audio]'. "
+                      "Then restart the app.")
+        raise ValueError(
+            f"Missing audio dependencies: {', '.join(missing)}. "
+            f"The app is using Python {sys.version_info.major}.{sys.version_info.minor} at {sys.executable}. "
+            f"{remedy} If you installed them in another environment, launch the app from that environment instead.")
 
 
 def decode_chunk(source: Path, output: Path, start: float, duration: float) -> None:
@@ -126,6 +137,16 @@ class WhisperXProvider:
         self.align_models = {}
         self.align_model_names = {}
 
+    def load_alignment(self, settings: TranscriptionSettings, device: str, precision: str) -> None:
+        """Load only the forced aligner when reviewing an existing transcript."""
+        dependency_check()
+        import whisperx
+        self.whisperx = whisperx
+        self.device = device
+        self.allow_download = settings.allow_download
+        self.align_models = {}
+        self.align_model_names = {}
+
     def transcribe_chunk(self, path: Path, offset: float, settings: TranscriptionSettings) -> list[TranscriptSegment]:
         try:
             audio = self.whisperx.load_audio(str(path))
@@ -157,15 +178,18 @@ class WhisperXProvider:
                     punkt = PUNKT_LANGUAGES.get(language, "english")
                     if not self.allow_download:
                         nltk.data.find(f"tokenizers/punkt_tab/{punkt}/")
-                    model_name = None
-                    if not self.allow_download:
-                        from whisperx.alignment import DEFAULT_ALIGN_MODELS_TORCH, TORCHAUDIO_PIPELINE_TO_HF
-                        model_name = TORCHAUDIO_PIPELINE_TO_HF.get(DEFAULT_ALIGN_MODELS_TORCH.get(language))
-                    if model_name is None:
-                        from whisperx.alignment import DEFAULT_ALIGN_MODELS_TORCH, DEFAULT_ALIGN_MODELS_HF
-                        model_name = DEFAULT_ALIGN_MODELS_TORCH.get(language) or DEFAULT_ALIGN_MODELS_HF.get(language)
+                    from whisperx.alignment import DEFAULT_ALIGN_MODELS_TORCH, DEFAULT_ALIGN_MODELS_HF
+                    model_name = DEFAULT_ALIGN_MODELS_TORCH.get(language) or DEFAULT_ALIGN_MODELS_HF.get(language)
                     if model_name is None:
                         raise ValueError(f"No default alignment model for language {language}")
+                    if not self.allow_download and language in DEFAULT_ALIGN_MODELS_TORCH:
+                        # WhisperX's torchaudio branch does not honor model_cache_only.
+                        import torch
+                        import torchaudio
+                        bundle = getattr(torchaudio.pipelines, model_name)
+                        filename = Path(bundle._path).name
+                        if not (Path(torch.hub.get_dir()) / 'checkpoints' / filename).is_file():
+                            raise ValueError('Alignment model is not cached; enable model downloads')
                     self.align_models[language] = self.whisperx.load_align_model(
                         language_code=language, device=self.device, model_name=model_name,
                         model_cache_only=not self.allow_download)

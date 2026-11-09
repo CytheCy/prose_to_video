@@ -184,7 +184,7 @@ def test_style_inheritance_and_aspect_conflict(tmp_path):
 
 
 def test_main_window_prompt_selection_edit_and_save(tmp_path):
-    from prose_to_video.gui.main_window import MainWindow
+    from prose_to_video.gui.legacy_main_window import MainWindow
     app = QApplication.instance() or QApplication([])
     session, scene, board, library, _ = setup(tmp_path)
     store = PromptStore(session.root)

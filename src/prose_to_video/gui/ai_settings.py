@@ -10,6 +10,22 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpin
 from prose_to_video.pipeline.providers import AISettings
 
 
+TEXT_MODELS = ("gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra")
+# Presets supported by the application's image adapter.
+IMAGE_MODELS = ("gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2")
+
+
+def model_selector(models, current):
+    selector = QComboBox()
+    selector.setEditable(True)
+    selector.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+    selector.addItems(models)
+    if current and selector.findText(current) < 0:
+        selector.addItem(current)
+    selector.setCurrentText(current)
+    return selector
+
+
 def load_ai_settings() -> AISettings:
     store = QSettings("ProseToVideo", "ProseToVideo")
     defaults = AISettings()
@@ -43,7 +59,8 @@ class AISettingsFields:
         self.provider = QComboBox()
         self.provider.addItem("OpenAI")
         self.provider.setCurrentText(settings.provider)
-        self.model = QLineEdit(settings.model)
+        self.text_model = model_selector(TEXT_MODELS, settings.model)
+        self.model = self.text_model.lineEdit()
         self.credential_env = QLineEdit(settings.credential_env)
         self.credential_file = QLineEdit(settings.credential_file)
         self.credential_file.setPlaceholderText("Leave empty to use the environment variable")
@@ -72,7 +89,7 @@ class AISettingsFields:
         self.overlap_chars.setRange(0, 499999)
         self.overlap_chars.setValue(settings.overlap_chars)
         form = QFormLayout()
-        for label, widget in (("Provider:", self.provider), ("Model:", self.model),
+        for label, widget in (("Provider:", self.provider), ("Words generation model:", self.text_model),
                               ("Credential environment variable:", self.credential_env),
                               ("API key file:", file_row),
                               ("Temperature:", self.temperature), ("Max output tokens:", self.max_output),
@@ -130,3 +147,61 @@ class AISettingsDialog(QDialog, AISettingsFields):
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         self.layout().addWidget(buttons)
+
+
+class GenerationAISettingsDialog(QDialog):
+    """Text and image model choices for the active stills workspace."""
+
+    def __init__(self, settings, image_settings, save, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("AI Settings")
+        self._image_settings = image_settings
+        self._save = save
+        self.general = AISettingsWidget(settings)
+        self.image_provider = QComboBox()
+        self.image_provider.addItems(["OpenAI", "ComfyUI"])
+        self.image_provider.setCurrentText(image_settings.provider)
+        self.image_model = model_selector(
+            IMAGE_MODELS if image_settings.provider == "OpenAI" else (), image_settings.model)
+        self._models = {image_settings.provider: image_settings.model}
+        self._previous_provider = image_settings.provider
+        self.image_provider.currentTextChanged.connect(self._provider_changed)
+        form = QFormLayout()
+        form.addRow("Image generation provider:", self.image_provider)
+        form.addRow("Image generation model:", self.image_model)
+        note = QLabel("Text and images use separate models. Image choices are saved as defaults "
+                      "and applied to the open project. ComfyUI may leave the model empty to use "
+                      "its workflow; configure the workflow in Image Settings.")
+        note.setWordWrap(True)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.general)
+        layout.addLayout(form)
+        layout.addWidget(note)
+        layout.addWidget(buttons)
+
+    def _provider_changed(self, provider):
+        self._models[self._previous_provider] = self.image_model.currentText()
+        self.image_model.clear()
+        if provider == "OpenAI":
+            self.image_model.addItems(IMAGE_MODELS)
+        self.image_model.setCurrentText(self._models.get(
+            provider, IMAGE_MODELS[0] if provider == "OpenAI" else ""))
+        self._previous_provider = provider
+
+    def _accept(self):
+        try:
+            general = self.general.values()
+            general.validate()
+            provider = self.image_provider.currentText()
+            model = self.image_model.currentText().strip()
+            if provider == "OpenAI" and not model:
+                raise ValueError("Choose an image generation model for OpenAI")
+            images = self._image_settings.model_copy(update={"provider": provider, "model": model})
+            self._save(general, images)
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "Could not save AI settings", str(exc))
+            return
+        self.accept()

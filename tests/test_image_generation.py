@@ -246,7 +246,7 @@ def test_comfy_reconciliation_and_gallery_signals(tmp_path):
 def test_gui_batch_progress_and_approval(tmp_path,monkeypatch):
     import time
     import prose_to_video.pipeline.image_generation as pipeline
-    from prose_to_video.gui.main_window import MainWindow
+    from prose_to_video.gui.legacy_main_window import MainWindow
     from PySide6.QtWidgets import QMessageBox
     session,scene,board,_=fixture(tmp_path)
     ImageStore(session.root).save_settings(ImageGenerationSettings(provider='Fake',model='fake-v1'))

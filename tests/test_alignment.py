@@ -16,7 +16,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
-from prose_to_video.gui.main_window import MainWindow
+from prose_to_video.gui.legacy_main_window import MainWindow
 from prose_to_video.models.alignment import AlignmentRun, TranscriptSegment, TranscriptWord, WordAlignment
 from prose_to_video.models.scene import Scene, source_hash
 from prose_to_video.pipeline.audio_alignment import align_project
@@ -285,7 +285,7 @@ def test_gui_scene_seek_and_prose_highlight(tmp_path):
 
 
 def test_gui_align_button_uses_background_worker(tmp_path, monkeypatch):
-    import prose_to_video.gui.main_window as gui
+    import prose_to_video.gui.legacy_main_window as gui
     app = QApplication.instance() or QApplication([])
     session, scenes = project_with_sources(tmp_path)
     window = MainWindow()

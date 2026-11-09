@@ -1,6 +1,9 @@
 # Prose to Video
 
-Prose to Video is a Fedora KDE desktop application for turning written stories and narrated audio into videos. Stage Ten coordinates the existing scene, alignment, storyboard, image, animation, and render stages through a persistent production queue. Shots can use approved stills, deterministic camera movement, or approved generated clips.
+Desktop prose-to-stills-to-video editor. The active application has six tabs:
+**Start → Place → Character → Scenes → Stills → Video Production**.
+Settings are available from Start and the menu. Historical storyboard, generic entity,
+animation, production queue, QC and approval interfaces are inactive.
 
 ## Fedora KDE setup
 
@@ -33,276 +36,126 @@ python -m pytest -q
 
 The GUI smoke test uses Qt's `offscreen` platform, so it does not require a visible desktop session. For interactive use, launch `prose-to-video` from a Fedora KDE session. `python -m prose_to_video.main` is an equivalent launch command.
 
-## Projects, prose, and audio
+## Workflow
 
-Choose **File → New Project** and enter a project name and parent directory. You can also choose a UTF-8 `.md` or `.txt` file as the source prose in this dialog. The app creates a new folder named after the project. To choose or change the prose file later, use **Choose Prose File** in the project workspace. Use **Import Audio** for `.mp3`, `.wav`, `.flac`, or `.m4a` files. Imports copy the originals into `source/`; the originals are left unchanged. If a source filename already exists in the project, the import is rejected so no file is overwritten. Rename the source file before importing it again if you want to keep both copies.
+1. In **Start**, create/open a project, import UTF-8 prose, optionally link narration,
+   configure AI/image/export settings, and save a project visual style and image density.
+   Imports preserve the original files. Re-import the active prose file after editing it to reload its changed text; other duplicate source filenames are rejected.
+2. **Analyze Story** first reads the whole story in bounded requests to establish
+   character/place identities, then plans visual beats using validated sentence IDs,
+   and writes staging and a self-contained TTI prompt for each scene. It does not
+   generate images. Cancel safely; Analyze Story resumes saved checkpoints.
+   After prose changes, Analyze Story clears the previous analysis, scenes, prompts,
+   still selections and timeline, then rebuilds through image prompts. Reference
+   images are preserved and reattached to matching character/place names or aliases;
+   references for absent identities remain saved for future analysis.
+3. **Place** and **Character** contain canonical descriptions, stable IDs and optional
+   reference images. Character lists only people participating in more than one
+   included scene, resolving aliases and unambiguous pronouns to the same person.
+   One-off subjects remain available for scene staging and prompts. Select the references to condition
+   generation and save. Absence of references never blocks text-only generation.
+4. **Scenes** is the authoritative editor for each still's original prose passage,
+   identity links, description, staging, camera, lighting and final prompt. Select a
+   scene to highlight its exact passage. List fields use one entry per line. Save
+   manual edits; prompt regeneration is explicit. Select prose to split at its start,
+   or merge with the next scene. Existing images remain available after restructuring.
+5. **Stills** generates selected/missing images, imports images, and selects candidates.
+   The first successful result becomes usable immediately. Failed regeneration keeps
+   the current selection. Metadata retains exact source ranges, prompt/request snapshot,
+   provider/job, identities and references. Unsupported reference limits produce an
+   actionable error. Negative prompts on providers without that feature are visibly
+   appended as Avoid instructions and recorded in the request snapshot.
+6. In **Video Production**, click **Build Timeline from Stills + Audio** to assemble
+   every included scene's selected still with the full narration in one step. It reuses
+   current word alignment or aligns narration automatically with the default local
+   speech model (first use may download model weights). **Align Narration…** remains
+   available for custom alignment settings. Timing comes from aligned source words,
+   never AI timestamps. The first image covers leading audio;
+   images change at the next scene's speech start and hold through pauses; the last
+   covers trailing audio. Speech spans and display intervals are separate fields.
+   Use the audio player's seek/play controls to preview the selected stills against
+   narration. Export MP4 through FFmpeg; Preview Export opens a rendered video.
 
-The prose panel displays Markdown as source text and preserves line breaks. Its statistics count Unicode characters, words, and paragraphs. A word is a Unicode letter/digit/underscore sequence with optional internal apostrophes; hyphens separate words and Markdown punctuation is ignored. A paragraph is a nonempty text block separated by a blank line. The text is read on a worker thread and inserted into the viewer in chunks.
+The timeline table edits display start/end times in seconds. Adjust both sides of a shared boundary,
+then Save Timeline Edits. Manual intervals survive rebuilds; conflicting rebuilds fail
+without replacing the saved timeline.
 
-The audio panel has play, pause, stop, seek, elapsed time, duration, and volume controls. FFprobe records duration, codec, sample rate, and channel count when available. **File → Video Output Settings** changes width, height, and frame rate; defaults are 1920 × 1080 at 30 fps. **Save Project** updates the project's modified time. Imports and settings save automatically. **Close Project** clears the workspace; **Open Project** asks for an existing project folder. The app reopens the most recently opened available project at startup. **Open Recent** lists up to 10 recently opened projects and has a command to clear the list.
+**Nearest fit** is the default timing option in Video Production. Build Timeline uses
+verified word matches where possible, interpolates missing scene boundaries between
+nearby matches, and falls back to prose-length proportions when no matches are available.
+Narration discrepancies do not block this mode. Approximate rows are labeled; preview
+and adjust their display cuts, then Save Timeline Edits or export. The full audio and
+all included stills remain on the timeline, and alignment flags remain available for review.
+Choose **Strict** to require verified narration throughout.
 
-Each project is self-contained:
+For optional transcript correction and precise timing, open **Review Narration…**:
 
-```text
-Project_Name/
-├── project.sqlite
-├── source/          # copied prose and narration
-├── scenes/
-├── alignment/
-├── storyboard/
-├── references/
-├── images/
-├── video_clips/
-├── previews/
-└── output/
-```
+1. Matching automatically reconciles hyphens, joined words, accents, dotted acronyms,
+   common title abbreviations, cardinal numbers and spoken years. Original prose and
+   character positions stay intact. Joined phrases use their verified audio range;
+   the app never invents individual word timings.
+2. Select a flagged passage, play it, and compare the read-only manuscript context
+   with the editable transcript. Correct recognition errors to what you hear. Keep
+   real extra or repeated speech in the transcript. Uncheck **Show discrepancies only**
+   to inspect any other passage.
+3. Mark each edited passage as listened to and checked. **Save Draft** and switching
+   passages save corrections locally; closing and reopening review preserves them.
+4. Choose **Re-align and Build Timeline**. The app runs the corrected transcript through
+   the local audio aligner without running speech recognition again, recalculates all
+   discrepancies, and builds only when the included prose has verified timing and
+   no unmatched transcript speech remains. If actual omissions or repetitions remain,
+   review reports them; it does not silently waive them. Fix the recording or manuscript
+   production selection as appropriate. Changing manuscript text still requires resolving
+   scene anchors (see Current limits).
 
-The database stores project and scene records. Exported scene breakdowns can be saved in `scenes/`. The `references/` folder stores imported reference images and cached thumbnails; `images/` stores generated originals and separate thumbnails. `video_clips/` stores generated candidates and render cache segments; `previews/` and `output/` store rendered outputs. Source paths are relative to the project folder, so moving the whole folder keeps references valid. A missing source file appears as missing in the project panel and can be replaced with a new import.
+Drafts live in `alignment/transcript-review.json` and belong to a specific source/alignment
+version. Cancellation or alignment failure preserves the last alignment, saved timeline,
+images, and correction draft. Existing saved transcripts gain the improved matching on
+build or review without another recognition pass.
 
-The SQLite schema uses `PRAGMA user_version`. Version 1 contains the Stage One `project` table. Version 2 adds `scene_analysis` and `scene` tables. Version 3 adds alignment runs, indexed words, scene timings, and transcript checkpoints. Version 4 adds project storyboard settings, storyboard runs, active scene plans, and indexed shot records. Version 5 adds visual entities, aliases, evidence, variants, reference image metadata, scene and shot relationships, style profiles, and an audit trail. Version 6 adds project prompt settings, versioned image prompts, active and approved version pointers, and reference relationships. Version 7 adds image generation settings, persistent jobs, generated candidates, and approved image selections. Candidate metadata includes source fingerprints, parent images, provider usage, and costs when available. Version 8 adds project render settings, render-only shot overrides, and persistent render jobs and history. Version 9 adds shot production modes and duration policies, motion prompt versions, video generation settings and jobs, portable video candidates, approved selections, and approval history. Version 10 adds production profiles, runs, tasks, dependency edges, checkpoints, quality issues, usage, fallbacks, and manifests. Version 11 adds source-hash-scoped manuscript classification and inclusion decisions. Version 12 adds persistent character reference preparations and generation status. Existing older projects migrate in place when opened; unknown newer versions are refused. Scene, alignment, storyboard, prompt-version, and production-graph writes are transactional, so failed writes preserve preceding results.
+Audio alignment requires the optional WhisperX dependency:
+`python -m pip install -e '.[audio]'`. Model weights may need downloading on first use.
 
-## Markdown manuscript compatibility
-
-Import ordinary UTF-8 Markdown or text without rewriting the prose. The **Manuscript** tab lists the complete structure, including ATX (`#` through `######`) and setext headings, numbered headings of any width, unnumbered headings, and a possible preamble. Sections, narrative scenes, and visual shots are separate concepts. A section may contain several scenes, and a scene may need several shots. Standalone ellipses and punctuation are preserved and do not create scenes on their own.
-
-The tab suggests **Narrated Story**, **Heading or Chapter Label**, **Editorial Note**, **Excluded from Production**, or **Requires Review**. It suggests inclusion of section bodies; headings are treated as unspoken by default. Editorial notes such as revision instructions are suggested for exclusion and flagged for review. Select a row to navigate to its exact source range, adjust classification and inclusion, and save. The original file is never changed. Changing inclusion clears the active alignment pointer so a fresh match can be made; saved alignment history and approved images remain available. Re-run scene detection after changing inclusion so scene boundaries and storyboards reflect the new map. Existing projects migrate to schema version 12 in place.
-
-Audio matching uses a derived set of eligible source ranges with exact character offsets back to the original manuscript. It tolerates unspoken headings, excluded text, punctuation, and common dotted acronyms. It never assigns timestamps to unmatched text. Review spoken numbers, years, repeated dialogue, and uncertain recognition against the recording. Verified audio pauses determine timing; repeated `... ... ...` has no fixed duration.
-
-The structure report suggests narrative formats such as advertisements, radio, television, exposition, memories, surveillance, video calls, and screen interfaces. It records presentation order separately from supported story-year order, explicit age claims, and likely conflicts for review without changing the prose. It also lists repeated names and object words as lexical candidates; repetition alone does not establish identity. Export the report as JSON or Markdown from the Manuscript tab. These classifications and conflicts are deterministic suggestions, not confirmed story facts. A shot can record its viewpoint, physical observer location, remote depicted location, media source, screen framing, visual treatment, and whether an external view is deliberate. Shot and prompt instructions preserve those distinctions. Dialogue may remain in one shot across several turns, while exposition can use explanatory views or montage. Visual Library entities support period and age variants and parent location relationships; approved references remain distinct from source evidence.
-
-Recommended preparation: keep meaningful headings, leave revision notes clearly marked, and review the inclusion map before audio alignment or paid generation. There is no required heading numbering or rigid scene format. Inspect chronology, viewpoint, and continuity warnings before approving imagery, especially when narration skips source text or a scene switches between a physical room and media on a screen.
-
-The regression fixture `tests/fixtures/001_40_Marvin.md` is a byte-identical copy of `/home/cport/Desktop/Obsidian20xx/Episodes/001_40_Marvin.md` (SHA-256 `cd57dd2929b5364a9c58a489fe4ef60aa5f07ac04c8e23ee54731d21b972c331`). The supplied `001_40_Marvin(2).md` was confirmed by the user to have the same prose. The fixture is used for source-range, structure, format, and chronology regression checks.
-
-## Detecting and reviewing scenes
-
-In **File → AI Scene Detection Settings**, choose a text file containing only your OpenAI API key. The application saves the file path in its application settings and reads the key from the file when making a request. You can also set an OpenAI API key in your shell environment before launching the application. For example:
+If alignment still reports missing dependencies after installation, check the Python
+path in the error. Install and launch using the same virtual environment. In particular,
+an older `.venv` made with Python 3.14 cannot use the audio packages installed in a
+separate Python 3.12 environment such as `.venv312`. Launch that environment explicitly:
 
 ```bash
-export OPENAI_API_KEY='your-key-here'
-prose-to-video
+.venv312/bin/python -m prose_to_video.main
 ```
 
-The key itself is never saved to the project database or exports. If a file is selected, it takes precedence over the environment variable. Use **File → AI Scene Detection Settings** to choose the provider, model, credential file or environment variable, optional temperature, maximum output tokens, model context limit, chunk size, and overlap size. Set the context limit to the selected model's documented capacity; the application checks a conservative UTF-8 byte budget before each request. The initial provider is OpenAI; the provider interface can support others later. The default model is [`gpt-6-luna`](https://developers.openai.com/api/docs/models/gpt-6-luna) with a conservative 128,000-token configured context limit. See the [OpenAI Python client's structured output helper](https://github.com/openai/openai-python/blob/main/helpers.md) for the API method used.
-
-Open a project with imported prose and click **Detect Scenes** in the Scenes panel. Each prose paragraph becomes its own scene, including consecutive paragraphs in the same location. Nonempty prose lines are treated as paragraphs, matching manuscripts that use single returns; headings stay attached to the following paragraph. Manuscript section boundaries preserve the inclusion map. **Cancel** stops after the current API request. Processing runs in a worker thread; failed or canceled analysis preserves saved scenes. Running detection again asks for confirmation because it replaces boundaries and manually edited descriptions.
-
-Scene descriptions use two stages: factual extraction, then a visual development pass informed by broader prose. The AI reads included paragraphs in order and carries forward bounded continuity notes about character appearance, places, periods, and atmosphere. Each scene uses only earlier paragraphs as context for both factual details and visual staging. For example, five paragraphs in a post office produce five scenes that retain the established post office setting until the prose changes it. Each scene then gets a rich **Visual description** covering characters, foreground, midground, background, atmosphere, and camera framing. Matching character/place catalog details and the selected project styles enrich this description. Reasonable visual additions are allowed and identified as proposals; the factual summary remains separate. Context must not introduce offstage characters or reveal future events. Technical exposition can use concept maps, blueprints, CAD views, or product showcases through **Render type**. Large scenes receive descriptions for successive passages. These extra AI passes use the configured model and incur additional requests.
-
-Headings remain attached to the following prose range and are excluded from scene descriptions and narrative classification. Python validates that scenes cover the original text exactly, without gaps or overlap. Scenes are tied to the manuscript's SHA-256 hash; changed prose marks old offsets outdated until reanalysis.
-
-The **Places** tab immediately after Scenes reads the original prose with AI, independently of scene detection. **Detect Places** lists reusable settings in first-appearance order, then writes detailed visual descriptions, then links the finished catalog to any current scenes through source passages. You can detect places before scenes; links are filled in when scenes are available. General places include **Industrial Area** or **The Shoe Factory**, rather than cities, “Outside,” or individual rooms. Materially different periods remain separate, such as **Marvin's Street 2020** and **Marvin's Street 2030**. Room-specific details belong within the building description or scene description. Edit names and descriptions with **Save Place Details**; these edits survive detection again. Double-click a linked scene to open it. Place descriptions feed image-prompt generation alongside the shot's specific setting, and description edits invalidate affected prompt fingerprints. Detection uses the configured AI provider and requires credentials. Canceling or failing during AI analysis preserves the previous catalog.
-
-Select a scene to highlight its exact range in the read-only prose viewer. The right panel shows factual fields such as location, characters, point of view, summary, environment, objects, actions, dialogue participants, and atmosphere. Edit them and click **Save Scene Details**. Enter list fields one item per line. **Split Scene** offers internal paragraph boundaries. **Merge With Next Scene** combines adjacent ranges. Both operations preserve all source text and clear affected summaries and visual descriptions; update their descriptions after changing a boundary.
-
-**Export Scenes** writes JSON with complete structured records, offsets, source text, source hash, and available timing, or Markdown with a readable breakdown. **Detailed JSON** also includes word, sentence, transcript, and issue records. Exports contain no API credentials. Missing timing is explicitly unresolved.
-
-Known scene detection limitations: the first provider requires network access and valid OpenAI credentials; live API behavior depends on the selected model's availability and context limits. Chunk size limits each description request, so lower it for models with smaller token windows. AI descriptions still require human review. Long paragraphs are described in multiple requests, and their descriptions are combined. Scene splitting currently uses paragraph starts. Cancellation cannot interrupt an API request already in flight, but the client has a 60-second request timeout.
-
-## Aligning narrated audio (Stage Three)
-
-The local audio pipeline uses FFmpeg, [WhisperX](https://github.com/m-bain/whisperX), PyTorch, and a language-specific speech alignment model. Stage Three requires no API key. Install the audio extras into a **Python 3.12 or 3.13** environment. To use CPU, first select the current CPU wheel instructions on [PyTorch's Linux installation page](https://pytorch.org/get-started/locally/), then install the application extras:
-
-```bash
-python3.12 -m venv .venv312
-source .venv312/bin/activate
-python -m pip install -e '.[audio,test]'
-```
-
-WhisperX pulls PyTorch and other dependencies; installing the PyTorch build suited to your machine first avoids an unsuitable GPU wheel. For NVIDIA CUDA, use the matching CUDA option in the PyTorch selector and check `python -c 'import torch; print(torch.cuda.is_available())'`. The app offers `auto`, `cpu`, and `cuda`: auto uses CUDA only when PyTorch reports it available, otherwise CPU. Intel integrated graphics currently use CPU. Auto precision is `int8` on CPU and `float16` on CUDA; `float32` and `int8` can be selected explicitly. The default `tiny` model and batch size 4 are conservative starting points, but CPU alignment can still be slow and memory use depends on the chosen models and recording. WhisperX reports that its much larger `large-v2` model uses under 8 GB of GPU memory in a specified configuration; that is not a minimum hardware guarantee for this app. [WhisperX setup and memory guidance](https://github.com/m-bain/whisperX#technical-details-).
-
-Open a project with both prose and narration imported, optionally **Detect Scenes**, then click **Align Audio**. Choose the Whisper model, device, precision, batch size, chunk duration, and language. The app asks whether model downloads are allowed for this run. Choose **No** to use cached models only; a missing model produces a clear error. A first permitted run may fetch Whisper, Silero voice detection, NLTK sentence data, and a language-specific wav2vec2 alignment model. Common Hugging Face model files live under `~/.cache/huggingface/hub` (or `HF_HOME/hub`); Silero is cached under PyTorch's hub directory, usually `~/.cache/torch/hub`; NLTK uses its normal data locations. [Hugging Face cache documentation](https://huggingface.co/docs/hub/en/local-cache), [WhisperX model selection](https://github.com/m-bain/whisperX/blob/main/whisperx/alignment.py). The application never silently fetches these large models.
-
-Alignment runs off the GUI thread. Progress reports audio preparation, transcription, forced word alignment, manuscript matching, sentence and scene timing, and saving. **Cancel Alignment** stops at a chunk or stage boundary. FFmpeg converts bounded chunks to mono 16 kHz PCM in temporary files; it never changes the imported audio, trims leading silence, or removes pauses. The original timeline remains the timestamp reference. An hour-long recording is processed in chunks rather than decoded all at once. The waveform is a cached half-second peak summary in `alignment/`, generated separately from model work.
-
-Select a scene to see its start, end, duration, matched-word coverage, original prose, transcribed speech, unmatched manuscript words, and warnings. **View Transcript** shows the full recognized transcript, including a completed transcription checkpoint if later alignment failed. **Play Scene** seeks and plays through that scene's spoken interval. Select prose in the viewer and click **Play Selected Prose** to play its matched range. During playback and seeking, the matching sentence is highlighted using stored source offsets. Click the waveform to seek or select a timed scene. Scene boundaries appear on the time ruler. To correct a scene boundary, edit the start and end fields in seconds and click **Save Scene Times**. Corrections are marked manual, validated against audio duration, and preserved across ordinary scene detail edits. Splits and merges recalculate timing from existing words; a changed range discards its old manual correction.
-
-Word, sentence, paragraph, and scene timing is stored in SQLite with the exact source hashes. If prose or audio changes, stale timing is hidden and cannot be used for playback or export. A completed transcript or forced alignment checkpoint is reused only for the same audio hash and model settings. A failed or canceled new run does not replace the active alignment. **Export Scenes** includes numeric seconds in JSON and readable times in Markdown; choose **Detailed JSON** for words, sentences, transcript, and issues. Unresolved passages have null timing rather than estimated timing.
-
-If FFmpeg or FFprobe is missing, install `ffmpeg-free` and verify both commands are on `PATH`. If `torch` or `whisperx` cannot be imported, check that the app and dependencies are installed in the same Python environment; WhisperX 3.8.6 cannot be installed into Python 3.14. If CUDA is selected but unavailable, use CPU or follow the [PyTorch installation selector](https://pytorch.org/get-started/locally/) for a compatible driver and wheel. On out-of-memory errors, try `tiny` or `base`, batch size 1, a shorter chunk, or CPU. Unsupported detected languages need a compatible alignment model; Stage Three does not guess word timing without one.
-
-Known limitations: WhisperX's recognition and language-specific alignment can miss or mishear speech, especially repeated or revised passages, numbers, unusual symbols, and overlapping voices. Those words and scenes need review. Manuscript matching is order preserving and conservatively leaves very large ambiguous passages unresolved. Transcription is saved after its full first pass, so interruption during that pass requires retranscription. A manually corrected scene boundary changes scene playback/export timing only; it does not rewrite word timestamps. Model installation and real model inference depend on the local Python, codec, and hardware combination and have not been tested on every Fedora system.
-
-## Planning visual shots (Stage Four)
-
-A narrative **scene** is a continuous part of the story. A **shot** is one planned view during part of that scene. One scene may have many shots: an establishing view, a character close-up, an object insert, and a view through a window can all belong to the same scene. Shots never modify narrative scene boundaries, manuscript text, or verified word alignment.
-
-Open a project with detected scenes and choose the **Storyboard** tab beside **Scenes**. Select a scene in the Scenes tab, then choose **Generate Scene**. **Generate Selected…** opens a multiple-scene picker; **Generate All** processes every scene. Generation uses the same AI provider, model, and environment credential configured under **File → AI Scene Detection Settings**. It runs on a background thread, and **Cancel** stops at the next request boundary. Replacing an existing scene plan asks for confirmation because manual shot edits may be lost. Other scenes remain untouched when regenerating one scene. A failed or canceled generation preserves saved plans. No API key is needed to open, edit, or export an existing storyboard.
-
-Open **File → Storyboard Settings…** or use **Settings…** in the Storyboard tab to save per-project settings. Low density targets roughly 12–20 seconds per shot, Medium 6–12 seconds, and High 3–6 seconds. Custom density uses the entered target duration. These guide the model; visible changes in the story determine breakpoints. Minimum and maximum durations limit which shots can be marked ready; enable duration exceptions only when you accept unusually short or long shots. Settings also cover visual style, camera movement intensity, establishing views, close-ups, environmental details, and narration pause assignment. The exact settings and fingerprint used in each generation stay with its storyboard.
-
-The AI chooses visual content and labeled source sentence breakpoints. Python extracts each passage from the manuscript using exact half-open character offsets, then derives shot boundaries from existing aligned words and scene timing. The AI does not supply timestamps. For fully timed scenes, shots continuously cover the scene's assigned visual interval; pauses between shots or adjacent scenes belong to the previous or next shot according to the project setting. Scene visual coverage is stored separately on each storyboard from its constituent spoken words. Long pauses are noted in shot timing details. Missing or uncertain word anchors yield partially timed shots or an untimed draft; the application never guesses precise times. Such storyboards are marked **Draft**, and only validated complete timelines are **Ready** for later rendering. Correct the alignment or review and explicitly edit shot times before relying on synchronization.
-
-The shot list shows numbers, titles, start and end times, durations, shot types, descriptions, and review status. Its preview area is a placeholder. Select a shot to see its exact prose passage and edit foreground, background, environment, characters, appearances, actions, props, framing, angle, position, movement, lighting, atmosphere, transition, suggested motion, and visual description. **Save Shot** persists changes and marks descriptive edits as manually edited; an unchanged shot can be marked Reviewed. Start and end fields accept seconds or can be left blank for unresolved timing. Invalid, overlapping, or out-of-scene intervals are rejected. The model may make cinematic choices about framing and lighting, but review all claimed character, prop, and event details against the source.
-
-**Split…** offers internal sentence boundaries. When that boundary has verified word timing, both resulting shots retain continuous audio coverage; otherwise they need timing review. **Merge Next** combines adjacent source and time ranges. **Insert…** partitions a shot and creates a new editable visual description. **Move Visual Down** swaps the visual plans of adjacent timeline slots and marks both for review against their passages; source and time order remain chronological. **Delete…** asks whether the previous or next shot should cover the removed interval, so no gap is silently left. These operations preserve the exact manuscript source ranges and do not change the alignment.
-
-The blue storyboard timeline draws timed shots in proportion to duration, with a red playback indicator. Click a region to select its shot; **Play Shot** seeks the existing narration player to the shot's start and stops at its end. Selecting a shot scrolls to and highlights its exact prose range. Selecting a passage inside one shot identifies that shot. During playback, the active shot follows the audio. Scene, shot, and sentence playback highlights use separate layers. Untimed draft shots have no synchronized timeline region. A changed manuscript, scene boundary, or audio alignment is identified as stale and blocks timed playback or export until reviewed or regenerated.
-
-Use **Export…** in the Storyboard tab for complete structured JSON or a scene-ordered Markdown breakdown with source passages, timing, visual descriptions, and camera details. Unresolved timing is labeled explicitly. Exports contain no credentials. Stage Four creates no image assets, animation, motion effects, or rendered clips. Stage Five adds stable entity references and approved images for later image generation.
-
-Known limitations: live AI output depends on provider access, response quality, and context limits; the automated workflow uses a deterministic fake provider and has not verified a live generation request. Very long individual source tokens cannot be split safely into planning chunks. Continuity still needs human review. Shot timing remains draft where Stage Three alignment is uncertain. The timeline is a planning view, not video playback.
-
-## Visual continuity and reference assets (Stage Five)
-
-Open the **Visual Library** tab after importing prose and detecting scenes. The left side lists non-character entities; manage characters and their references in the **Characters** tab. Search by name or alias and filter by category. Use **Add Entity** to create one manually, or **Extract Selected Scene**, **Extract Multiple Scenes…**, or **Extract All Scenes** to analyze existing scene source ranges with the configured AI provider. Extraction runs in a worker thread and processes long scenes in bounded chunks. **Cancel Extraction** stops at a request boundary. The provider must be configured under **File → AI Scene Detection Settings**. No key is needed for manual library work.
-
-Extraction proposes visual identities and records appearance details as separate evidence. An exact quote in the manuscript is labeled **explicit**; inference and AI proposals remain distinct. An AI detail with no matching quote cannot become an explicit fact. Select an entity to review its description and evidence. Double-click an evidence row to mark it Approved, Reviewed, Needs Review, or Rejected. The main entity fields can be edited independently; unknown features can stay blank. Saved manual appearance edits are labeled as approved user design choices in the evidence record. Approving an AI detail makes it available to future reference packages, but extraction never overwrites an approved entity or image. Reanalysis is safe for previously reviewed work. Check suggestions for ambiguous identities and use aliases, entity type corrections, and the review status controls as needed. AI-suggested aliases appear as evidence and become active aliases only after approval.
-
-Use **Merge Entities** to combine duplicate identities after confirmation. Scene and shot links, evidence, variants, and image associations move to the surviving stable ID. **Separate Selected Links** moves a chosen scene, shot, image, evidence record, or variant to a new entity if two identities were conflated. Double-click a related scene or shot to remove its association. A manually removed shot link is remembered and will not be restored by automatic reconciliation. The audit log retains entity merge and separation details. Entity deletion asks for confirmation and leaves imported image files available for other associations.
-
-Use **Import Image** to copy a PNG, JPEG, or WebP into `references/`. The original is not changed. Image processing runs on a worker thread. The app validates image content, records dimensions, format, SHA-256, and import time, and creates a cached 256-pixel thumbnail. Identical files reuse one asset record; distinct files with the same filename get unique internal names. Choose a role such as portrait, full-body view, establishing view, front view, or detail view, and add an optional description. Use **Approve** to preserve an image as a continuity reference and **Set Primary** to identify the main approved view. Removing an approved association asks for confirmation. Reference paths stay relative to the project, so moving the whole project folder preserves them. On open, missing or externally changed files appear as warnings; the app never silently substitutes another image. An unreferenced asset cleanup API is available for confirmed maintenance operations.
-
-Use **Add Variant** for a named change in clothing, damage, setting, or another legitimate narrative appearance. Double-click a variant to edit its description, status, scene context, and default setting. Only approved variants are offered when linking an entity to a shot. The **Storyboard** panel displays associated entities and the count of approved images. Use **Add Visual Entity…** or **Remove Selected Entity** there to edit shot links. **Pin Approved Image…** attaches a chosen approved view directly to the shot; **Unpin Selected Image** removes that choice. Explicit name mentions in a shot can establish an initial association; pronouns and ambiguous names remain for review. Selecting an entity in the library shows its related scenes, shots, and the number of affected shots. Changes to references do not rerun scene detection, alignment, or storyboard timing.
-
-The project visual style section stores artistic intent: aesthetic, rendering approach, palette, lighting, camera style, realism, textures, rules, and negative constraints. Use **Save Style** for the project profile, **Save Preset** and **Load Preset** for profiles within a project. **Export Style** and **Import Style** move a profile between projects. **Override Scene** and **Override Shot** apply nonempty fields from the editor at the selected scope; shot fields take precedence over scene fields, which take precedence over project fields. This is independent of any future image model settings.
-
-Use **Inspect Continuity** to review possible duplicate identities, differing source descriptions, missing references for recurring characters, missing links and image files, and a variant assigned outside its scene context. Confirmed and possible warnings are labeled separately. Inspection does not change prose or shots. **Export JSON** writes stable IDs, aliases, evidence, variants, image metadata, relationships, and style information. **Export Markdown** writes a readable guide by category with relative image paths. **Export Style** writes the project style as its own JSON file. Exports contain no image binaries or API credentials. The provider-independent reference package API includes the effective style, approved entity descriptions and details, approved variants, approved image metadata, and source-grounded constraints for a shot.
-
-Stage Five prepares reference assets only. It does **not** generate images, animate them, or render a final video. Known limitations: AI suggestions require human review; pronouns and uncertain identity matches are not automatically merged; the continuity inspector is conservative and may flag legitimate descriptive changes; image integrity verification can take time in projects with many large assets; live provider results depend on network access, credentials, and model behavior. The Stage Five extraction tests use a deterministic fake provider and do not make external API requests.
-
-## Image prompt generation (Stage Six)
-
-Open a project with narrative scenes and a storyboard, select a shot in **Storyboard**, then open **Image Prompts**. **Generate Prompt** creates one version for that shot. **Generate Scene** and **Generate All** process saved storyboard shots in order and skip shots that already have a prompt, including approved ones. **Regenerate Prompt** explicitly creates a new version. If a prompt is approved, its approved version stays active while the new version is saved in history for review. **Cancel** stops after the current AI request; completed versions remain saved. Generation runs in a worker thread. Use **Settings…** to save project-specific detail level, composition, environment and character emphasis, continuity strictness, environmental additions, negative prompts, neighboring-shot context, and whether a batch pauses after each prompt. The model field can inherit the application's **AI Scene Detection Settings** model. Credentials use the key file or environment variable selected there; the key itself is never saved with the project.
-
-The language-model request contains the selected shot's exact source passage and offsets, preceding prose in the same scene, scene and storyboard details, limited neighboring-shot continuity context, approved Visual Library written design details, selected approved appearance variant, effective project/scene/shot style, and output aspect ratio derived from video dimensions. Later prose is excluded from the surrounding passage to avoid premature reveals. Reference-image identifiers and metadata remain in the local prompt package; image binaries are not sent to the language model. The generated positive prompt is assembled deterministically from editable narrative, composition, camera, foreground, middle ground, background, environment, appearance, action, object, lighting, material, and style fields. Negative text is kept separate for future image providers that support it.
-
-Edit the prompt fields and choose **Save Changes** to create another version. Use the version selector to view earlier versions, then **Restore Version** to make one active. **Revert Unsaved** reloads the active version. **Approve Prompt** explicitly approves the active version after deterministic validation. Approved versions are retained separately from drafts. **Copy Prompt** copies the positive text for use in an external image tool. **Export…** writes the selected prompt, current scene, or whole project as structured JSON or readable Markdown. Exports include references by identifier and relative path, not image data or API keys. Reference thumbnails in the editor show approved images; missing files are labeled.
-
-Prompt fingerprints track the selected shot, scene description, associated approved visual entities and variants, reference metadata, effective visual style, project dimensions, relevant neighbor context, and generation settings. The editor shows **Outdated** when these inputs change. Updating one entity only affects prompts linked to it. Outdated versions are kept for review; regeneration never deletes them. Approval checks missing prompt text, shot and source association, entity links, missing reference files, stale fingerprints, required named subjects, and conflicting aspect ratio instructions. A stage-seven generation package can be assembled locally from an approved current prompt, its style, ratio, entity details, reference IDs and paths, and dependency fingerprint. It makes no image-generation request.
-
-Known limitations: AI prompt quality and narrative accuracy need human review; a text prompt alone cannot guarantee consistent character appearance. The deterministic validator catches structural problems but cannot prove semantic consistency. Missing approved images are reported while approved written descriptions remain usable. The automated tests use a deterministic fake AI provider; no live API request is claimed. Stage Six does not generate images, animation, or video.
-
-## Generating and reviewing images (Stage Seven)
-
-Open a project with storyboard shots and **approved Image Prompts**. Select a shot, then open **Image Gallery**. Choose **Settings…** to select OpenAI or ComfyUI, model, dimensions, quality, candidate count, output format, reference use, spending cap, and queue settings. The initial OpenAI model is `gpt-image-2.5-flare`; check [current OpenAI image model and size support](https://developers.openai.com/api/reference/resources/images/methods/generate) before changing it. The default 1536 × 864 frame has a 16:9 aspect ratio. A model must support the requested dimensions; the app does not resize originals. The gallery checks the selected provider's capabilities before submission. An approved prompt whose dependencies changed requires an explicit one-shot override for shot generation. The prompt itself and its outdated status remain unchanged.
-
-For OpenAI, choose an API key file in **File → AI Scene Detection Settings** or set `OPENAI_API_KEY` in the shell that launches the app. The official OpenAI Python SDK calls `images.generate` for text-to-image and `images.edit` for image references or refinement. The key is read at request time and never stored in SQLite. OpenAI has no negative-prompt field; the approved negative prompt is appended as an “Avoid” instruction in the submitted text, and the transformation is recorded with the job. Seeds are not offered for OpenAI. The app shows the actual returned model when available. OpenAI's image endpoints, supported model choices, sizes, and quality options can change; see the [Images API reference](https://developers.openai.com/api/reference/resources/images/methods/generate) and [image edits reference](https://developers.openai.com/api/reference/resources/images/methods/edit).
-
-For ComfyUI, start a compatible server yourself and enter its URL (default `http://127.0.0.1:8188`). Use **Import workflow JSON…** to choose an **API-format** workflow. Saving the settings copies that JSON into `storyboard/workflows/` so the project can move with its workflow definition. Map application fields to your workflow's actual node IDs and input names in the JSON mapping editor. A minimal example is:
-
-```json
-{
-  "positive_prompt": {"node": "6", "input": "text"},
-  "negative_prompt": {"node": "7", "input": "text"},
-  "width": {"node": "5", "input": "width"},
-  "height": {"node": "5", "input": "height"},
-  "seed": {"node": "3", "input": "seed"},
-  "candidates": {"node": "5", "input": "batch_size"},
-  "references": [{"node": "12", "input": "image"}],
-  "outputs": ["9"]
-}
-```
-
-Adapt every node ID to the imported workflow. A field is available only when mapped; reference generation requires mapped image inputs. The adapter validates workflow structure, mapped inputs, and output nodes before submission. It uploads selected references to the server, submits through `/prompt`, checks `/queue` and `/history/{prompt_id}`, and copies completed `/view` images into the project. It does not install ComfyUI or download models. See the [ComfyUI server routes](https://github.com/Comfy-Org/docs/blob/main/development/comfyui-server/comms_routes.mdx).
-
-**Generate Image** produces a candidate for the selected shot using its approved prompt. **Generate Variations** requests at least two candidates. **Generate Scene** and **Generate Project** queue eligible shots from the current scene or whole project. A preflight dialog lists selected, approved, missing, outdated, and skipped shots, plus provider, candidate count, and any available cost estimate. Approved shots are skipped by default in scene and project batches. For a deliberate new candidate on an approved shot, select it and use **Regenerate**. The old approved image remains selected until you explicitly approve another. **Refine Selected** uses a chosen candidate as a source image when the provider supports edits; it creates a new candidate and records the parent.
-
-The gallery shows thumbnails, a larger selected preview, status, provider, model, dimensions, creation time, prompt version ID, and approval state. **Compare Candidates** displays up to four thumbnails together. **Approve Image** selects a candidate for the shot; **Reject Image** marks a candidate rejected. **Lock Approved** protects the selected asset from replacement until **Unlock Approved**. Candidate files are preserved when another is approved. The storyboard shows each shot's image state and approved image preview. A technically valid image still needs human review for story accuracy and character continuity.
-
-The app uses approved Visual Library images from the prompt's reference package, with pinned or primary references first, then character, robot, and vehicle references, then locations and other roles. When a provider limits image inputs, the confirmation dialog lists excluded reference IDs; job details retain included and excluded IDs. Reference content hashes are checked before submission. Reference-conditioned output can improve continuity but cannot guarantee it.
-
-Jobs are saved in SQLite before a provider request. Completed images and thumbnails live under `images/scene_<id>/shot_<id>/` with UUID filenames. Paths in SQLite are relative to the project root, so moving the entire project preserves links. The original provider bytes are retained; thumbnails are separate PNGs. If an image is missing after moving a project, the gallery and manifest identify the missing file rather than substituting another. **Generation Details** shows the saved request settings, reference IDs, transformations, provider job ID, usage, and actual or estimated cost where known. Cost estimates are user-configured and may differ from billing. A spending cap blocks new submissions when no safe estimate is available or the threshold would be exceeded.
-
-On reopening a project, unfinished submitted jobs become **Needs Reconciliation**. ComfyUI jobs with known IDs are checked against server history without resubmitting. OpenAI requests have no job lookup in this adapter; uncertain requests remain flagged and require manual review before any new paid request. **Resume / Reconcile Jobs** can submit pending, never-submitted jobs after confirmation and check known server job IDs. **Cancel Pending** stops the current batch after its active request and marks remaining queued items canceled. A cloud request already submitted may still complete and incur a charge. ComfyUI queued jobs can be removed when the server confirms they are pending.
-
-Use **Export…** in Image Gallery for generation JSON, Markdown, a provider-independent visual timeline JSON, or **Approved images and manifest**. The last option copies approved files to a selected folder with ordered stable filenames and `approved_images.json`; it refuses existing output filenames. The timeline manifest includes each shot's audio range, duration, approved image and dimensions, planned camera movement and transition, and readiness. It does not call a provider.
-
-Known limitations: Live paid OpenAI generation was not exercised by the automated suite. ComfyUI needs a compatible running server, configured workflow, and available model or backing API. The gallery's compare view uses thumbnails and does not offer masks or semantic image scoring. Job progress shows known queue states; OpenAI does not report a percentage. AI character animation is available through a configured Stage Nine video workflow; image generation remains independent of video generation.
-
-## Producing videos (Stage Eight)
-
-Stage Eight builds a frame-accurate render plan from the existing storyboard and Stage Seven visual timeline manifest. The imported narration remains the master audio source. Shot boundaries come from saved audio timestamps; frames are allocated from absolute timestamps at the chosen frame rate, avoiding accumulated per-shot rounding errors. Visual coverage extends over pauses and leading or trailing silence according to the selected pause policy. Verified word and scene timestamps are never rewritten. Full renders ordinarily last for the entire narration; shot and scene renders use the selected source interval and shift the preview timeline to zero.
-
-Install FFmpeg and FFprobe with H.264 (libx264) and AAC support. On Fedora, check `ffmpeg -encoders | grep libx264` and `ffprobe -version`. Open the **Video Production** tab after importing narration, detecting scenes, creating a timed storyboard, and approving images in **Image Gallery**. Choose **Validate Timeline** to see missing images, outdated dependencies, missing or overlapping timestamps, gaps, scene issues, and transition problems by scene and shot. Errors block rendering. Warnings require confirmation. A **Final Render** requires approved, current, intact images for every shot. **Render Draft Preview** is an explicit separate action and labels missing images in the video; draft output is never recorded as a final render.
-
-Use **Render Settings…** to select width and height (even dimensions), frame rate, H.264 quality (CRF), encoder preset, fit or crop, motion intensity, default transition, pause policy, and MP4 location. The project video output settings supply the initial resolution and frame rate. Fit preserves the entire image with background padding; crop fills the frame without stretching it. H.264 software encoding is the baseline. Audio is copied when an AAC full-length source can safely be remuxed; otherwise the original narration is encoded to AAC without normalization or speed changes. No music or effects are added.
-
-Use **Render Selected Shot** or **Render Selected Scene** to make a narrated partial preview, or **Render Full Video** to produce the complete story. A finished MP4 opens automatically in the tab's Qt player; Play, Pause, Stop, seek, and volume controls are available. **View Render History** lists prior jobs; double-click a completed item to play it. **Open Output Folder** opens the selected destination. Existing MP4s are preserved under numbered names. Each successful export includes a neighboring `.render.json` manifest with the narration, shot sequence, visual asset IDs, camera instructions, transitions, settings, source fingerprints, and probed output metadata.
-
-Each shot can use static framing, slow zoom in or out, horizontal or vertical pan, diagonal pan, combined pan and zoom, or custom start and end framing. Subtle motion is the default. The Storyboard tab's camera movement provides the initial instruction. In Video Production, select a shot in Storyboard, then set its **Shot camera movement**, optional **Approved custom framing** coordinates and zooms, transition, and duration. **Save Shot Render Settings** stores these separately from the storyboard image and prompt. Render the selected shot to check the effect without regenerating the illustration. Tracking and aerial instructions cannot be reproduced faithfully from a flat image; validation reports a static fallback. Low-resolution images may also receive a static fallback to avoid excessive upscaling. Movement does not create three-dimensional motion or animate characters.
-
-Hard cuts are the default. Crossfade, fade through black, fade in, and fade out are supported. Transition lengths must fit the neighboring shots. Blends use allocated frames at the shot boundary and do not extend the narration timeline. Fade in applies at the start of a selection; fade out applies at its end. The plan stores the resolved transition and motion parameters for reproducibility.
-
-Rendering runs in a background thread. The tab shows the current shot or assembly stage and processed duration. **Cancel Render** stops FFmpeg's process group and removes incomplete temporary outputs while keeping approved images, narration, cache, and prior exports. Jobs are saved in SQLite as Pending, Validating, Rendering, Completed, Failed, Canceled, or Interrupted. Opening a project marks jobs from a previous shutdown Interrupted. Render History and the job error text help diagnose failures. FFprobe checks completed MP4 streams, codecs, dimensions, frame rate, duration, and frame count; this technical check does not assess visual or story quality.
-
-Individual encoded shot and transition files live in `video_clips/render_cache/`. Their keys include image contents, frame count, dimensions, frame rate, movement, fit policy, and encoder settings. Unchanged shots are reused; changing one image invalidates its dependent pieces. The cache is pruned after successful renders to 20 GiB. **Clear Render Cache** removes only these intermediates, never original images, narration, or final MP4 files. Final assembly may still run again after any change.
-
-Known limitations: Stage Nine adds approved generated video clips to the same render plan and FFmpeg assembly path. Establishing-image substitution and a live editing preview are not available. The rendered MP4 is the reliable preview. Very large projects need sufficient disk space for cached compressed segments and the final export. Visual motion is restricted to two-dimensional framing and is intentionally reduced or replaced with static framing when the source image cannot support it safely.
-
-
-## AI image-to-video animation (Stage Nine)
-
-Each storyboard shot has a **Shot production mode** in Video Production: **Static Image** holds the approved image, **Camera Motion** uses Stage Eight framing, and **AI Animation** uses approved generated clips. Existing shots default to Camera Motion, preserving earlier renders. Changing modes does not change the approved image. A final render with AI Animation selected requires a valid approved clip and resolved duration coverage. A draft can use the approved still only when **Use approved still if AI clip is missing in draft preview** is selected and saved.
-
-Select a storyboard shot and open **AI Animation**. The tab shows the approved starting image, exact prose passage, shot description and duration. **Generate Motion Prompt** calls the existing configured language-model provider with text and image IDs; it does not upload image bytes. The request asks for specific physical actions supported by the passage, continuity constraints, and camera instructions. Edit the prompt, negative prompt, camera movement, and continuity fields, then **Save Changes** and **Approve Prompt**. Each save and regeneration creates a new version. Use the version selector to inspect earlier versions. The previous approved version remains available until another version is explicitly approved. Review the wording for narrative accuracy before generation.
-
-Use **Video Settings…** to set a separate ComfyUI video profile. Start a compatible ComfyUI server yourself, locally or remotely, and import an **API-format workflow JSON**. The app copies it into `storyboard/video_workflows/`; it does not change the image workflow under `storyboard/workflows/`. Use **Test Connection** to check the server and **Validate Workflow** with an approved starting image to check the mapped controls before generation. Map workflow inputs by their actual node IDs and input names. A minimal mapping shape is:
-
-```json
-{
-  "starting_image": {"node": "image-loader-id", "input": "image"},
-  "motion_prompt": {"node": "text-node-id", "input": "text"},
-  "frame_count": {"node": "video-node-id", "input": "length"},
-  "width": {"node": "size-node-id", "input": "width"},
-  "height": {"node": "size-node-id", "input": "height"},
-  "frame_rate": {"node": "save-node-id", "input": "frame_rate"},
-  "output_video": "save-node-id"
-}
-```
-
-Adapt every identifier and input name to the imported workflow. Optional mapping keys are `ending_image`, `negative_prompt`, `duration`, `seed`, `motion_intensity`, `model`, `output_format`, and `references` (a list of node/input mappings). A workflow that uses fixed values can declare `fixed_duration`, `fixed_width`, `fixed_height`, `fixed_frame_rate`, and `fixed_output_format` in its mapping instead of exposing controls. Optional `max_duration`, `supported_frame_rates`, `supported_resolutions`, and `formats` constrain requests. The adapter validates mapped nodes and requested capabilities before calling ComfyUI. By default it uploads the starting image and any configured ending or reference images. For a workflow using a server-side file, set an image mapping to `"mode": "reference"` with its `"filename"` (and optional `"subfolder"` and `"type"`); the adapter checks the server file hash against the approved local image before submission. It then submits `/prompt`, checks `/history` and `/queue`, and retrieves the mapped video output through `/view`. Wan image-to-video workflows are supported when their actual API JSON and nodes are mapped; no Wan version or model filename is hardcoded. The app does not install ComfyUI or download models.
-
-The starting frame is the shot's approved Stage Seven image. The ending frame can be another approved image or an image imported with **Import Ending Image…**. The app checks aspect ratio and requires an `ending_image` workflow mapping. References come from approved Visual Library shot relationships when enabled; a workflow without enough mapped reference inputs is rejected before submission. **Generate Clip** makes the configured number of independent candidates. **Generate Scene** and **Generate Project** show a preflight count and cost estimate, then process only shots explicitly set to AI Animation with approved motion prompts. Approved and locked shots are skipped by default. Each candidate retains its own job, source IDs, settings, provider output, poster, and technical metadata under `video_clips/scene_<id>/shot_<id>/`.
-
-Select a clip to play its video in the gallery. Generated clip audio is muted there and discarded from the final render. You can compare poster frames, inspect job details, approve or reject clips with visual issue notes (appearance, anatomy, disappearing objects, unwanted motion, background or camera instability, and narrative mismatch), and lock the approved selection. Select multiple candidates in playback order and **Approve Clip** to approve a sequence. **Generate Continuation** extracts the selected clip's final frame with FFmpeg and asks for a short continuation prompt; it preserves the parent clip and records the relationship. Model continuity is not guaranteed, so review the boundary before approving a sequence.
-
-A clip shorter than its storyboard shot must have explicit coverage. In Video Production, choose **exact** when approved clips cover the interval, **still_tail** to hold the approved image after motion, **camera_tail** to add deterministic movement to that still, or **sequence** for approved clips in order. Save the policy with **Save Animation Coverage**. Clip playback is never silently stretched or looped. Shot timing remains tied to the original narration. The renderer normalizes clip dimensions and frame rate, allocates frames from absolute storyboard timestamps, applies cuts and fades between image and video shots, and maps only the imported narration into the finished MP4. Use **Render Selected Shot** or **Render Selected Scene** to preview animated content with its original narration interval.
-
-Video jobs are recorded before submission. When a project reopens, unfinished submitted jobs become **Needs Reconciliation**. Known ComfyUI job IDs are checked automatically without resubmission; **Resume / Reconcile Jobs** can check them again. Jobs without a lookup ID remain flagged. Pending jobs are submitted only after confirmation. **Cancel Generation** stops the batch and requests cancellation of queued ComfyUI work when supported. Project spending caps count known estimates or actual costs and block submission when cost is unknown. Estimates are not invoices. The queue processes up to the configured maximum concurrent jobs. A project-wide submission lock reserves estimated spending before each request; the default is one job at a time.
-
-Every returned clip is probed for container, codec, dimensions, frame rate, frame count, duration, and audio, then fully decoded with FFmpeg for corruption checks. Originals remain intact; rendering creates normalized cache segments. Use **Export…** in AI Animation for JSON or Markdown metadata, or an ordered export of approved clips with `approved_clips.json`. Exports refuse existing filenames. Project-relative asset paths remain valid when the whole project folder moves.
-
-Known limitations: The automated suite uses fake provider results and synthetic FFmpeg clips. A running ComfyUI server and installed compatible video workflow/model are needed for real AI animation; no model is downloaded automatically. Large local video models can require substantial GPU memory, system memory, disk space, and generation time. Intel integrated graphics should not be expected to run large models efficiently. Capability and cost information depend on the imported workflow; the app reports unsupported controls and unknown costs. Technical validation cannot establish story accuracy or character consistency. The gallery compares poster frames and plays one clip at a time; complex visual review and editing remain manual. The application does not add generated narration, music, sound effects, or lip sync.
-
-## Automated production and quality control (Stage Ten)
-
-Open a project with imported prose and narration, then choose **File → Generate Complete Video** or the **Production Dashboard** tab. The setup dialog starts with the project's existing image, video, and render settings. Select a saved profile or create a named profile, choose the output format and location, and use **Preview Production Plan** before **Start**. The plan lists reusable work, missing work, current readiness, known image and video cost estimates, unknown cost categories, and the expected output path. Starting a plan containing paid work requires an explicit confirmation. Dry-run and readiness inspection do not submit AI requests, generate media, render video, or change approved assets.
-
-The orchestrator stores a graph of source validation, scene detection, alignment, scene storyboard planning, entity extraction, image prompts, images, motion prompts, clips, timeline coverage, render, and manifest tasks. A task runs after its dependencies finish. As scene and shot records become available, the graph adds their tasks and updates dependencies. Source hashes, stage fingerprints, prompt dependencies, asset hashes, and approved selections determine reuse. An unchanged approved image is reused; a changed image or prompt affects its shot and dependent animation and render work. Camera movement and render overrides affect rendering. The original narration is used as the master audio in the existing FFmpeg renderer.
-
-Profiles are stored in the project database. **Illustrated Story** uses stills, **Cinematic Slideshow** adds camera movement and transitions, and **AI Animated Production** selects action shots for clips. The animation selector scores explicit movement words in the shot description and action fields, then takes the highest scoring shots within the configured percentage, count, and known video budget. The selected tasks are visible in the plan. It does not choose shots randomly. Existing locked clips are preserved. Changing a shot's mode through the policy requires the profile's mode-change authorization.
-
-**Fully Automatic** requires the automatic selection and approval checkbox. Automatic decisions are recorded with an automatic origin; they are not human review. **Review at Milestones** pauses after creative stages and requires the user to approve prompts, images, motion prompts, and clips in their existing workspaces before continuing. **Manual Production** shows readiness and recommendations while the existing stage controls remain in charge. The dashboard's **Approve Checkpoint and Continue** button checks required asset approvals where applicable. A completed render must pass technical validation before the production can be marked complete.
-
-Budgets can cap total, image, video, review, and per-shot estimated cost. Known actual charges are stored separately from estimates. When a provider has no reliable price estimate, the category requires explicit unknown-cost authorization. A finite cap cannot be verified against an unknown charge, so the queue blocks that combination and reports it in the plan. Unknown cost is never counted as zero. The production stops scheduling paid tasks when its budget policy blocks them. Canceled requests may still incur provider charges. Configure an authorized animation fallback in a profile to use Camera Motion or Static Image when video generation cannot finish; each fallback is recorded in the run and manifest. The default fallback is to pause. A locked approved clip is never replaced by an automatic fallback.
-
-**Pause** stops new task scheduling after the current task or active bounded batch. **Cancel** cancels pending top-level tasks and preserves completed assets. A provider request already submitted may continue. On reopening a project, active top-level runs are marked interrupted, and the existing image and video queues flag submitted jobs for reconciliation. **Resume** polls known provider job identifiers once and will not submit a replacement request whose paid completion is uncertain. Failed tasks retain an error and category; local transient failures have a bounded retry. After fixing a definite failure, use **Retry Failed** and confirm any new paid attempt. **Resolve Interrupted** requires confirmation that an external request did not complete or incur a charge before it can be retried.
-
-The **Quality Control** tab runs deterministic checks for missing alignment, unresolved timings, timeline and render-plan problems, missing or stale images and clips, and continuity warnings already available from the Visual Library. Production profiles can block rendering when a timeline gap exceeds their threshold. Findings persist in SQLite. Filter by severity, category, status, or scene ID; open the relevant editor to correct a specific shot; add resolution notes when resolving an issue. Optional semantic adapters can inspect an approved image or three representative clip frames only when explicitly authorized to share them with a compatible reviewer. Their findings are marked **AI Suggestion** and require human review. Technical validation of an MP4 checks streams, H.264/AAC codecs, resolution, frame rate, duration, audio/video timing, and sample-frame decoding. Automated checks cannot guarantee narrative or visual accuracy, and a technically valid image may still depict the wrong story content.
-
-Finished videos are written to the configured output directory. Each completed production writes `output/production-<run-id>.json`, containing the profile, source hashes, task fingerprints, approved assets, timing, approval and fallback decisions, usage, issues, and output path. The render system also writes a `.render.json` manifest alongside the MP4. **View Production History** lists prior runs and their output and manifest paths. Previous completed records and media are preserved; a later run can reuse current assets without copying large files.
-
-For a first automated production, import both source files, configure the scene provider and image provider as needed, open **Generate Complete Video**, select **Illustrated Story**, choose an automation level, inspect **Preview Production Plan**, authorize any unknown-cost categories you intend to use, and press **Start**. Review any milestone or issue shown on the dashboard. A project without current local WhisperX models needs the ordinary audio setup and explicit model-download choice described above; Stage Ten does not download large models on its own. Live AI provider availability, model quality, and exact charges depend on the configured services. Semantic review is optional and disabled unless invoked with explicit sharing authorization. Independent language, image, and video tasks can run in parallel within the profile and provider limits; all limits default to one for a conservative laptop setup.
-
-
-## Technical illustration and character reference preparation
-
-Storyboard planning can choose `concept_map`, `blueprint`, `cad_visualization`, or `product_showcase` for technical exposition. You can also select these in the storyboard's **Visual treatment** field. Concept maps emphasize systems and flows; blueprints emphasize sections and construction; CAD views emphasize geometry; product showcases emphasize a device. The treatment is carried into the final image prompt while preserving the project style and viewpoint. Selection is semantic, without keyword-count overrides or rotating treatments. Measurements and specifications must be supported by the prose.
-
-Scene descriptions receive preceding prose from the same included manuscript section for pronoun resolution only. Context is bounded by the overlap setting and at most one quarter of the scene chunk size; it resets at headings. Context cannot contribute new scene events or appearance facts. Original scene ranges and boundaries are unchanged. Ambiguous identities remain unspecified.
-
-Entity extraction automatically prepares character reference prompts locally, without a paid request. In **Characters**, select a character and inspect **Prepared character references**. **Prepare Character References** refreshes preparations after edits to evidence, variants or style. Preparations use source evidence and approved written details, keeping existing appearance variants separate. When there are multiple explicit numeric age claims such as “25 years old” and “70-year-old,” preparation suggests separate age variants; it does not infer age from section order. These suggestions need review. Existing manually defined variants take precedence.
-
-Choose **Review / Generate Reference…** to inspect or edit a prepared prompt and generate one candidate using the project's Image Settings. The request and its cost estimate are saved before submission. Candidates appear in **Reference images** as Suggested; approve them and associate the appropriate approved variant with shots before using them in production. Existing approved references are preserved. Prompt preparation is repeatable and retains history; changed inputs create new preparations. Reference generation uses the project image spending cap and records usage when supplied by the provider.
-
-For an interrupted or asynchronous request, the same button checks its saved provider job ID without resubmitting. If no ID is available, inspect the provider account before arranging another request. Character reference generation is a Characters tab operation; complete-video automation prepares prompts during extraction but does not automatically generate or approve reference images. AI appearance choices still require visual review.
-
-## Characters tab
-
-Click **Detect Characters** to analyze the entire imported prose using the configured AI settings, without first detecting scenes. The list keeps only characters involved in at least two distinct paragraphs (blank-line-separated blocks, or individual lines when the prose has no blank separators), including pronouns and aliases the AI can resolve. After discovering identities, a dedicated second pass reviews every prose chunk for participation through names, pronouns, narrator references, and descriptive references. It uses nearby context and identity excerpts across chunks before applying the recurrence filter. Pronouns are never saved as global aliases, and ambiguous references remain unassigned. Repeated mentions or analysis chunks within one paragraph count once. Review the results: AI identity resolution can be imperfect.
-
-Select a character to edit visual attributes for text-to-image prompts. Changes save automatically as you type. Unknown appearance details remain blank. Regeneration preserves edited attributes and reference images. **Choose Reference Image…** imports a PNG, JPEG, or WebP file; **Choose Reference Folder…** imports supported images directly inside a folder for the selected character. Images are copied into the project, displayed in the preview, and retained in the shared project library for shot association. Use **Approve Reference** and **Set Primary** in Characters to review the displayed image. Generation analyzes text; it does not generate portraits.
-
-Character generation checks for incomplete AI responses before parsing them. If output is cut off, it retries the affected section in smaller chunks, up to three splits, retaining the original paragraph IDs. Saved characters are replaced only after the whole analysis succeeds. If the output limit is still insufficient, the error identifies **Max output tokens** and **Chunk characters** in AI Settings; other validation errors identify the affected fields.
+Update any desktop shortcut's `Exec` path to that environment's `bin/prose-to-video`
+and restart the app. Reinstalling in `.venv312` does not change an already running app
+or a shortcut pointing at `.venv`.
+
+## Persistence and compatibility
+
+`project.sqlite` and source media remain intact. The active workflow is saved atomically
+in `stills-workflow.json`; images and reference files remain project-local. Back up or
+move the entire project folder. Scenes store original UTF-8 text hashes and Python
+character offsets; CRLF/CR/LF are preserved. Qt display normalization is translated back
+to source positions. Summaries and rewritten prose are never used as anchors.
+
+On first open, compatible character/place records, references, scenes, and complete
+shot-level source partitions migrate. All shot images are preserved as candidates,
+with historical selections preferred. Valid legacy timing boundaries become manual
+intervals. Ambiguous records remain in the historical database with a migration message.
+Historical approval flags do not gate the active workflow.
+
+## Current limits
+
+- Prose replacement preserves existing work and reports stale anchors; automatic
+  re-anchoring is not implemented. Use a new project for a revised manuscript.
+- Split/merge is blocked for scenes already placed on the timeline to preserve edits.
+  Removed scenes' images remain in metadata, but are not reassigned across passages.
+- Image generation is sequential, one candidate per request. Uncertain submissions
+  are logged and never automatically resubmitted; provider-side job recovery after
+  app restart is not implemented.
+- Very large continuity catalogs can exceed the configured AI context budget;
+  the provider rejects oversized requests explicitly rather than truncating identities.
+- Catalog aliases and names are established during analysis; the UI edits canonical
+  descriptions and references. Image/export settings currently use JSON editors.
+
+Tests use mocked providers and synthetic media, including real FFmpeg exports when the
+binary is installed. Verification never requires paid generation.

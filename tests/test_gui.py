@@ -11,7 +11,7 @@ import pytest
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QDialog
 
-from prose_to_video.gui.main_window import MainWindow
+from prose_to_video.gui.legacy_main_window import MainWindow
 from prose_to_video.gui.project_manager import NewProjectDialog
 from prose_to_video.models.scene import Scene
 from prose_to_video.pipeline.providers import BoundaryProposal, SceneDescription
@@ -20,7 +20,7 @@ from prose_to_video.storage.project_files import create_project, import_prose, o
 
 @pytest.fixture(autouse=True)
 def isolated_app_settings(tmp_path: Path, monkeypatch) -> None:
-    import prose_to_video.gui.main_window as main_window
+    import prose_to_video.gui.legacy_main_window as main_window
 
     settings_path = tmp_path / "app-settings.ini"
     monkeypatch.setattr(main_window, "QSettings",
@@ -39,7 +39,7 @@ def test_window_smoke() -> None:
 
 
 def test_choose_source_prose_when_creating_project(tmp_path: Path, monkeypatch) -> None:
-    import prose_to_video.gui.main_window as main_window
+    import prose_to_video.gui.legacy_main_window as main_window
     import prose_to_video.gui.project_manager as project_manager
 
     application = QApplication.instance() or QApplication([])
@@ -69,7 +69,7 @@ def test_choose_source_prose_when_creating_project(tmp_path: Path, monkeypatch) 
 
 
 def test_open_recent_persists_reopens_and_removes_missing_project(tmp_path: Path, monkeypatch) -> None:
-    import prose_to_video.gui.main_window as main_window
+    import prose_to_video.gui.legacy_main_window as main_window
 
     QApplication.instance() or QApplication([])
     settings_path = tmp_path / "settings.ini"
@@ -119,7 +119,7 @@ def test_startup_restores_next_available_recent_project(tmp_path: Path) -> None:
 
 
 def test_mock_detection_gui_workflow(tmp_path: Path, monkeypatch) -> None:
-    import prose_to_video.gui.main_window as main_window
+    import prose_to_video.gui.legacy_main_window as main_window
     application = QApplication.instance() or QApplication([])
     source = tmp_path / "story.txt"
     source.write_text("Ada waits.\n\nAt the station, Ben arrives.", encoding="utf-8")
@@ -193,7 +193,7 @@ def test_scene_selection_highlights_exact_source_range(tmp_path: Path) -> None:
 
 
 def test_places_tab_detects_shared_settings_and_opens_scene(tmp_path: Path, monkeypatch) -> None:
-    import prose_to_video.gui.main_window as main_window
+    import prose_to_video.gui.legacy_main_window as main_window
     from prose_to_video.pipeline.place_detection import PlaceProposal, PlaceProposals, PlaceDescription
     class PlaceProvider:
         def detect_places(self, payload):

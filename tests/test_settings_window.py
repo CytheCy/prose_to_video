@@ -6,7 +6,7 @@ import pytest
 from PySide6.QtCore import QEvent, QSettings, QTimer
 from PySide6.QtWidgets import QApplication, QDialog
 
-from prose_to_video.gui import ai_settings, main_window
+from prose_to_video.gui import ai_settings, legacy_main_window as main_window
 from prose_to_video.gui.settings_window import SettingsWindow
 from prose_to_video.storage import ai_preferences
 from prose_to_video.storage.generated_images import ImageStore

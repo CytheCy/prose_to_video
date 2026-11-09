@@ -10,6 +10,8 @@ from uuid import uuid4
 from prose_to_video.models.image_prompt import fingerprint
 from prose_to_video.models.image_job import ImageRequest
 from prose_to_video.models.visual_reference import AppearanceVariant, EntityReference
+from prose_to_video.pipeline.reference_composition import (
+    CHARACTER_REFERENCE_PEOPLE_ONLY, CHARACTER_REFERENCE_SUBJECTS)
 
 
 class ReferenceStore:
@@ -92,20 +94,23 @@ def prepare_character_references(library, entity_ids=None, *, current_attributes
                 if variant.age_min is not None or variant.age_max is not None:
                     details.append(f'Age range: {variant.age_min if variant.age_min is not None else "unspecified"} to {variant.age_max if variant.age_max is not None else "unspecified"}')
             style = library.prompt_style_values(library.style())
-            prompt = (f'Character identity reference for {entity.name}. One person only, full body standing, '
-                      'centered and facing the camera, face clearly visible, neutral expression and relaxed pose, '
+            prompt = (f'Character identity reference for {entity.name}. '
+                      + CHARACTER_REFERENCE_SUBJECTS
+                      + 'Full body standing for every subject, '
+                      'composition centered and all subjects facing the camera, each face clearly visible, neutral expressions and relaxed poses, '
                       'plain solid white blank background, even readable lighting. '
                       'No scenery, environment, background objects, patterns, textures, gradients or horizon line. '
-                      'Pull the camera back: show the entire figure from the top of the hair or headwear to the soles of both feet. '
+                      'Pull the camera back: show every entire figure from the top of the hair or headwear to the soles of both feet. '
                       'Keep at least 10 percent of the image height as empty headroom above the highest point of the head, '
                       'hair or headwear, and leave clear space below the feet and beside the hands. '
-                      'The figure must fit entirely within the central 80 percent of the canvas height. '
+                      'All figures must fit entirely within the central 80 percent of the canvas height. '
                       'Never crop the head, hair, headwear, hands or feet; no close-up or tight portrait crop. '
                       'Preserve the supplied identity and the selected age and clothing; do not blend life stages. '
-                      'No story action, extra people, captions or collage. Unknown appearance is an unapproved visual proposal. '
+                      'No story action, captions or collage. Unknown appearance is an unapproved visual proposal. '
                       + ' '.join(d for d in details if d) + '\nVisual style: '
                       + ('; '.join(v for v in style.values() if v) or 'Neutral illustration')
-                      + '\nApply the visual style to the character only; keep the background blank and solid white.')
+                      + '\nApply the visual style to all intended subjects; keep the background blank and solid white.'
+                      + CHARACTER_REFERENCE_PEOPLE_ONLY)
             inputs = {'entity': entity.model_dump(mode='json'), 'variant': variant.model_dump(mode='json') if variant else None,
                       'evidence': [e.model_dump(mode='json') for e in selected], 'style': style, 'prompt': prompt,
                       'current_attributes': current_attributes}

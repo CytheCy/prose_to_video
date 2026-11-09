@@ -115,10 +115,12 @@ def _import_file(session: ProjectSession, source: Path, kind: str) -> ProjectSes
     if not source_dir.is_dir() or not source_dir.resolve().is_relative_to(session.root.resolve()):
         raise ProjectError("Project source directory is missing or invalid")
     destination = source_dir / source.name
-    if destination.exists():
+    replacing_prose = kind == "prose" and session.project.prose_path == f"source/{source.name}"
+    if destination.exists() and not replacing_prose:
         raise ProjectError(f"A source file named {source.name} already exists in this project")
 
     temporary: Path | None = None
+    previous: Path | None = None
     committed = False
     try:
         with tempfile.NamedTemporaryFile(prefix=".import-", dir=source_dir, delete=False) as output:
@@ -139,10 +141,16 @@ def _import_file(session: ProjectSession, source: Path, kind: str) -> ProjectSes
                 "audio_codec": info.codec, "audio_sample_rate": info.sample_rate,
                 "audio_channels": info.channels,
             }
-        if destination.exists():
+        if destination.exists() and not replacing_prose:
             raise ProjectError(f"A source file named {source.name} already exists in this project")
-        # Link fails if the destination appeared during inspection. It never overwrites.
-        os.link(temporary, destination)
+        if replacing_prose and destination.exists():
+            # Keep the old copy until both the replacement and metadata save succeed.
+            previous = temporary.with_name(temporary.name + ".previous")
+            os.link(destination, previous)
+            os.replace(temporary, destination)
+        else:
+            # Unrelated source files (including audio) must never be overwritten.
+            os.link(temporary, destination)
         committed = True
         updated = _fresh(session.project, **changes)
         session.database.save(updated)
@@ -152,11 +160,16 @@ def _import_file(session: ProjectSession, source: Path, kind: str) -> ProjectSes
     except (OSError, ValueError, AudioInspectionError, ProjectDatabaseError) as exc:
         LOGGER.warning("Could not import %s %s: %s", kind, source, exc)
         if committed:
-            destination.unlink(missing_ok=True)
+            if previous is not None:
+                os.replace(previous, destination)
+            else:
+                destination.unlink(missing_ok=True)
         raise ProjectError(str(exc)) from exc
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+        if previous is not None:
+            previous.unlink(missing_ok=True)
 
 
 def import_prose(session: ProjectSession, source: Path) -> ProjectSession:

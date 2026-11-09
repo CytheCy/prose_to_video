@@ -36,6 +36,22 @@ class Scene(BaseModel):
     visual_atmosphere: str = ""
     boundary_reason: str = ""
 
+    source_version: str = ""
+    identity_links: list[str] = Field(default_factory=list)
+    foreground: str = ""
+    middle_ground: str = ""
+    background: str = ""
+    composition: str = ""
+    camera_framing: str = ""
+    camera_angle: str = ""
+    camera_position: str = ""
+    lighting: str = ""
+    palette_materials: str = ""
+    final_prompt: str = ""
+    negative_prompt: str = ""
+    prompt_dependency: str = ""
+    manual_fields: list[str] = Field(default_factory=list)
+
     @model_validator(mode="before")
     @classmethod
     def discard_legacy_review_status(cls, data):

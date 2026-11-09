@@ -323,8 +323,8 @@ def test_approved_reference_cannot_be_downgraded_by_duplicate_import(tmp_path):
 
 
 def test_gui_mock_extraction_and_storyboard_reference(tmp_path, monkeypatch):
-    import prose_to_video.gui.main_window as main_window
-    from prose_to_video.gui.main_window import MainWindow
+    import prose_to_video.gui.legacy_main_window as main_window
+    from prose_to_video.gui.legacy_main_window import MainWindow
     from prose_to_video.storage.project_files import import_prose
     app = QApplication.instance() or QApplication([])
     source = tmp_path / 'story.txt'; source.write_text('Jeff sees a white robot. Jeff waves.')

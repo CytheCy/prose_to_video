@@ -350,7 +350,7 @@ def test_stage_ten_offscreen_gui_setup_dashboard_and_issues(tmp_path):
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
 from prose_to_video.storage.project_files import open_project
-from prose_to_video.gui.main_window import MainWindow
+from prose_to_video.gui.legacy_main_window import MainWindow
 from prose_to_video.gui.production_dashboard import ProductionSetupDialog,ProductionDashboard,QualityControlPanel
 app=QApplication([])
 session=open_project(Path(__import__('sys').argv[1]))

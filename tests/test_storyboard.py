@@ -21,7 +21,7 @@ from prose_to_video.pipeline.shot_editing import split_shot, merge_shots, delete
 from prose_to_video.storage.project_files import create_project, import_prose, import_audio
 from prose_to_video.pipeline.audio_transcription import source_file_hash
 from prose_to_video.storage.storyboard_export import export_storyboard_json, export_storyboard_markdown
-from prose_to_video.gui.main_window import MainWindow
+from prose_to_video.gui.legacy_main_window import MainWindow
 
 TEXT = "Ada waits. Ben enters. Ada smiles."
 
@@ -214,7 +214,7 @@ def test_atomic_multi_scene_replacement(tmp_path, monkeypatch):
     assert [db.load_storyboard(s.identifier).identifier for s in scenes] == [b.identifier for b in originals]
 
 def test_gui_fake_generation_without_live_key(tmp_path, monkeypatch):
-    import prose_to_video.gui.main_window as gui
+    import prose_to_video.gui.legacy_main_window as gui
     app = QApplication.instance() or QApplication([])
     source = tmp_path/"story.txt"; source.write_text(TEXT)
     session = import_prose(create_project(tmp_path,"Project"),source)

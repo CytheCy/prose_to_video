@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import uuid4
 from threading import Event
 from typing import Callable
 
@@ -10,7 +11,7 @@ from prose_to_video.models.scene import Scene, source_hash, validate_partition
 from prose_to_video.pipeline.audio_transcription import (AlignmentCanceled, TranscriptionProvider,
     TranscriptionSettings, WhisperXProvider, runtime, source_file_hash, transcribe)
 from prose_to_video.pipeline.text_matching import (derive_scene_timings, derive_spans,
-                                                    match_words, sentence_ranges)
+                                                    match_words, sentence_ranges, MATCHING_VERSION)
 from prose_to_video.storage.database import ProjectDatabase
 from prose_to_video.utils.prose import read_prose
 from prose_to_video.pipeline.manuscript import included_ranges, inclusion_fingerprint
@@ -50,7 +51,7 @@ def align_project(prose_path: Path, audio_path: Path, scenes: list[Scene], db: P
     spoken = [word for segment in segments for word in segment.words]
     sections = ManuscriptStore(db).sections(text)
     production_ranges = included_ranges(sections)
-    words, passages, issues = match_words(text, spoken, production_ranges)
+    words, passages, issues = match_words(text, spoken, production_ranges, [s.start for s in scenes])
     progress("Matching transcript to prose", 1, 1)
     if cancel.is_set(): raise AlignmentCanceled("Audio alignment canceled")
     progress("Calculating sentence and paragraph times", 0, 1)
@@ -71,10 +72,29 @@ def align_project(prose_path: Path, audio_path: Path, scenes: list[Scene], db: P
                        transcription_model=settings.model,
                        alignment_model=provider.alignment_model,
                        device=device, precision=precision, config_fingerprint=fingerprint,
-                       inclusion_fingerprint=inclusion_fingerprint(sections),
+                       inclusion_fingerprint=inclusion_fingerprint(sections), matching_version=MATCHING_VERSION,
                        transcript=segments, passages=passages, words=words,
                        sentences=sentences, paragraphs=paragraphs, scenes=timings, issues=issues)
     progress("Saving results", 0, 1)
     db.save_alignment(run)
     progress("Saving results", 1, 1)
     return run
+
+
+def rematch_alignment(run, text, scenes, sections):
+    """Recalculate every diagnostic from verified transcript timings, never clear flags alone."""
+    if source_hash(text) != run.prose_hash:
+        raise ValueError('Prose changed; align the current sources first')
+    words, passages, issues = match_words(text, [w for s in run.transcript for w in s.words],
+        included_ranges(sections), [s.start for s in scenes])
+    sentences, paragraphs = derive_spans(text, words)
+    for sentence in sentences:
+        if sentence.status == 'unresolved' and any(w.status != 'excluded' and
+                sentence.source_start <= w.source_start and w.source_end <= sentence.source_end for w in words):
+            issues.append(AlignmentIssue(kind='unmatched_sentence', message='No verified speech for manuscript sentence',
+                source_start=sentence.source_start, source_end=sentence.source_end))
+    data = run.model_dump()
+    data.update(identifier=str(uuid4()), matching_version=MATCHING_VERSION,
+        inclusion_fingerprint=inclusion_fingerprint(sections), words=words, passages=passages,
+        issues=issues, sentences=sentences, paragraphs=paragraphs, scenes=derive_scene_timings(scenes, words))
+    return AlignmentRun.model_validate(data)

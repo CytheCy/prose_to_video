@@ -1,10 +1,11 @@
 """Tabbed application preferences."""
 
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFormLayout,
-                               QGroupBox, QLabel, QLineEdit, QMessageBox,
+                               QGroupBox, QLabel, QMessageBox,
                                QScrollArea, QTabWidget, QVBoxLayout, QWidget)
 
-from prose_to_video.gui.ai_settings import AISettingsWidget, load_ai_settings, save_ai_settings
+from prose_to_video.gui.ai_settings import (AISettingsWidget, IMAGE_MODELS, model_selector,
+                                          load_ai_settings, save_ai_settings)
 from prose_to_video.gui.project_manager import VideoSettingsWidget
 from prose_to_video.gui.storyboard_settings import StoryboardSettingsWidget
 from prose_to_video.models.image_job import ImageGenerationSettings
@@ -42,10 +43,12 @@ class SettingsWindow(QDialog):
         self.tti_provider = QComboBox()
         self.tti_provider.addItems(["OpenAI", "ComfyUI"])
         self.tti_provider.setCurrentText(self.image_settings.provider)
-        self.tti_model = QLineEdit(self.image_settings.model)
+        self.image_model = model_selector(
+            IMAGE_MODELS if self.image_settings.provider == "OpenAI" else (), self.image_settings.model)
+        self.tti_model = self.image_model.lineEdit()
         form = QFormLayout()
         form.addRow("Provider:", self.tti_provider)
-        form.addRow("Model:", self.tti_model)
+        form.addRow("Image generation model:", self.image_model)
         tti_layout.addLayout(form)
         note = QLabel("OpenAI images use the API credentials above. For ComfyUI, configure the server "
                       "and workflow in the project's Image Generation Settings; leave Model empty "
@@ -99,6 +102,9 @@ class SettingsWindow(QDialog):
     def _provider_changed(self, provider):
         self._tti_models[self._tti_previous_provider] = self.tti_model.text()
         default = ImageGenerationSettings().model if provider == "OpenAI" else ""
+        self.image_model.clear()
+        if provider == "OpenAI":
+            self.image_model.addItems(IMAGE_MODELS)
         self.tti_model.setText(self._tti_models.get(provider, default))
         self._tti_previous_provider = provider
 
