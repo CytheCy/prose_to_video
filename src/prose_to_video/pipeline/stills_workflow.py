@@ -700,6 +700,12 @@ def generate_still(session, state, scene, provider, cancel=None, progress=lambda
     request = ImageRequest(prompt=prompt, negative_prompt=negative, model=settings.model, width=settings.width,
         height=settings.height, quality=settings.quality, candidates=1, seed=settings.seed,
         output_format=settings.output_format, references=[ImageReference(asset_id=p, path=str(session.root/p), role='Continuity') for p in refs])
+    # Apply only to the outgoing still request; scene prompts and reference
+    # generation retain their existing behavior.
+    from prose_to_video.storage.visual_style_preferences import load_visual_styles
+    style_prompt = load_visual_styles().selected_prompt()
+    if style_prompt:
+        request = request.model_copy(update={'prompt': request.prompt + '\nStyle: ' + style_prompt})
     provider.validate(request)
     job = {'id': str(uuid4()), 'scene_id': scene.identifier, 'status': 'Submitting', 'request': request.model_dump(), 'provider': provider.name}
     state.jobs.append(job); state.save(session.root)

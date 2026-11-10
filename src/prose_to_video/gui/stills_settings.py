@@ -7,6 +7,8 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFormLayout
 from prose_to_video.gui.ai_settings import (
     AISettingsWidget, IMAGE_MODELS, load_ai_settings, model_selector, save_ai_settings)
 from prose_to_video.storage.ai_preferences import load_tti_defaults, save_tti_defaults
+from prose_to_video.gui.visual_style_settings import VisualStyleSettingsWidget
+from prose_to_video.storage.visual_style_preferences import load_visual_styles, save_visual_styles
 
 
 class StillsSettingsWindow(QDialog):
@@ -69,6 +71,8 @@ class StillsSettingsWindow(QDialog):
         note.setWordWrap(True)
         pre_layout.addRow(note)
         self._add_tab(pre_stills, 'Pre-Stills', project_only=True)
+        self.visual_style = VisualStyleSettingsWidget(load_visual_styles())
+        self._add_tab(self.visual_style, 'Visual Style')
         self.tabs.setCurrentIndex(initial_tab)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._accept)
@@ -135,6 +139,7 @@ class StillsSettingsWindow(QDialog):
                 updated.save(parent.session.root)
             save_ai_settings(general)
             save_tti_defaults(provider, model)
+            save_visual_styles(self.visual_style.values())
             parent.state = updated
         except (ValueError, OSError) as exc:
             QMessageBox.warning(self, 'Could not save settings', str(exc))

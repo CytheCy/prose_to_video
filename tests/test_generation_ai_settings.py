@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox
 from prose_to_video.gui import ai_settings, stills_window
 from prose_to_video.gui.stills_settings import StillsSettingsWindow
 from prose_to_video.pipeline.stills_workflow import load_workflow
-from prose_to_video.storage import ai_preferences
+from prose_to_video.storage import ai_preferences, visual_style_preferences
 from prose_to_video.storage.project_files import create_project
 
 
@@ -17,7 +17,7 @@ from prose_to_video.storage.project_files import create_project
 def window(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     factory = lambda *args: QSettings(str(tmp_path / 'preferences.ini'), QSettings.IniFormat)
-    for module in (ai_settings, ai_preferences, stills_window):
+    for module in (ai_settings, ai_preferences, visual_style_preferences, stills_window):
         monkeypatch.setattr(module, 'QSettings', factory)
     window = stills_window.MainWindow()
     yield window
@@ -113,7 +113,7 @@ def test_start_settings_button_and_tabs(window):
         try:
             assert isinstance(dialog, StillsSettingsWindow)
             assert [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())] == [
-                'AI Settings', 'Image Settings', 'Export Settings', 'Pre-Stills']
+                'AI Settings', 'Image Settings', 'Export Settings', 'Pre-Stills', 'Visual Style']
             assert not dialog.style.isEnabled()
             assert not dialog.image_json.isEnabled()
             assert not dialog.export_json.isEnabled()

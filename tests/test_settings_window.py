@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QApplication, QDialog
 
 from prose_to_video.gui import ai_settings, legacy_main_window as main_window
 from prose_to_video.gui.settings_window import SettingsWindow
-from prose_to_video.storage import ai_preferences
+from prose_to_video.storage import ai_preferences, visual_style_preferences
 from prose_to_video.storage.generated_images import ImageStore
 from prose_to_video.storage.project_files import create_project, open_project
 
@@ -21,7 +21,7 @@ def application():
 @pytest.fixture
 def window(tmp_path, monkeypatch, application):
     factory = lambda *args: QSettings(str(tmp_path / 'preferences.ini'), QSettings.IniFormat)
-    for module in (ai_settings, ai_preferences, main_window):
+    for module in (ai_settings, ai_preferences, visual_style_preferences, main_window):
         monkeypatch.setattr(module, 'QSettings', factory)
     window = main_window.MainWindow()
     yield window
@@ -128,7 +128,7 @@ def test_storyboard_settings_save_and_cancel(window, tmp_path):
     project = create_project(tmp_path, 'Storyboard preferences')
     window._set_session(project)
     dialog = SettingsWindow(window)
-    assert [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())] == ['AI', 'Video', 'Storyboard']
+    assert [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())] == ['AI', 'Video', 'Storyboard', 'Visual Style']
     dialog.storyboard.density.setCurrentText('Custom')
     dialog.storyboard.target.setValue(12)
     dialog.storyboard.style.setText('Watercolor')

@@ -8,6 +8,8 @@ from prose_to_video.gui.ai_settings import (AISettingsWidget, IMAGE_MODELS, mode
                                           load_ai_settings, save_ai_settings)
 from prose_to_video.gui.project_manager import VideoSettingsWidget
 from prose_to_video.gui.storyboard_settings import StoryboardSettingsWidget
+from prose_to_video.gui.visual_style_settings import VisualStyleSettingsWidget
+from prose_to_video.storage.visual_style_preferences import load_visual_styles, save_visual_styles
 from prose_to_video.models.image_job import ImageGenerationSettings
 from prose_to_video.models.project import VideoSettings
 from prose_to_video.models.shot import StoryboardSettings
@@ -89,6 +91,8 @@ class SettingsWindow(QDialog):
         storyboard_scroll.setWidgetResizable(True)
         storyboard_scroll.setWidget(storyboard_page)
         self.tabs.addTab(storyboard_scroll, "Storyboard")
+        self.visual_style = VisualStyleSettingsWidget(load_visual_styles())
+        self.tabs.addTab(self.visual_style, "Visual Style")
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
@@ -126,6 +130,7 @@ class SettingsWindow(QDialog):
                 images.output_format = "png"
             save_ai_settings(general)
             save_tti_defaults(provider, model)
+            save_visual_styles(self.visual_style.values())
             if self.image_store:
                 self.image_store.save_settings(images)
             if storyboard is not None:

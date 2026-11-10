@@ -13,6 +13,7 @@ from prose_to_video.pipeline.image_providers.comfyui_provider import ComfyUIProv
 from prose_to_video.storage.generated_images import ImageStore
 from prose_to_video.storage.image_prompts import PromptStore
 from prose_to_video.storage.visual_library import VisualLibrary
+from prose_to_video.storage.visual_style_preferences import load_visual_styles
 
 
 def make_image_provider(settings: ImageGenerationSettings, root=None):
@@ -180,6 +181,12 @@ class ImageGenerator:
         if cancel and cancel.is_set():
             job.status='Canceled';self.store.update_job(job);return job
         self._budget_ok(job)
+        # Resolve at submission time, including recovered/queued jobs. Never mutate
+        # the approved scene prompt or the caller's reusable request.
+        style_prompt = load_visual_styles().selected_prompt()
+        if style_prompt:
+            request = request.model_copy(update={'prompt': request.prompt + '\nStyle: ' + style_prompt})
+        self.provider.validate(request)
         job.submitted_at=utcnow()
         # Commit before a potentially paid call. An interruption now requires reconciliation.
         job.status='Submitted';self.store.update_job(job)
