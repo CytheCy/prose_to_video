@@ -70,6 +70,7 @@ class AudioPlayer(QWidget):
         self.player.setSource(QUrl.fromLocalFile(str(path)) if path else QUrl())
         self.waveform.set_data([], known_duration or 0)
         self.waveform.set_timings([])
+        self.waveform.set_boundaries([])
         for widget in (self.play_button, self.pause_button, self.stop_button, self.seek):
             widget.setEnabled(path is not None)
 

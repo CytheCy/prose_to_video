@@ -1,14 +1,15 @@
 """Six-tab workspace for the direct stills workflow. No legacy workers are started."""
 from pathlib import Path
 from threading import Event
+from time import monotonic
 import json
 import logging
 from uuid import uuid4
-from PySide6.QtCore import QThread, Signal, Slot, Qt, QUrl, QTimer, QSignalBlocker, QSettings
-from PySide6.QtGui import QPixmap, QDesktopServices
+from PySide6.QtCore import QThread, Signal, Slot, Qt, QUrl, QTimer, QSignalBlocker, QSettings, QEvent
+from PySide6.QtGui import QPixmap, QDesktopServices, QAction, QKeySequence
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QPlainTextEdit, QListWidget, QFormLayout, QScrollArea, QSplitter,
-    QFileDialog, QInputDialog, QMessageBox, QDialog, QDialogButtonBox, QComboBox, QTableWidget, QTableWidgetItem)
+    QFileDialog, QInputDialog, QMessageBox, QDialog, QDialogButtonBox, QComboBox, QTableWidget, QTableWidgetItem, QLineEdit)
 from prose_to_video.pipeline.stills_workflow import (Workflow, Identity, Interval, load_workflow,
     analyze, dependency, regenerate_prompt, generate_still, store_still, assemble_timeline,
     validate_timeline, render_plan, listed_identities, generate_character_reference)
@@ -43,6 +44,14 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__(); self.setWindowTitle('Prose to Video'); self.resize(1350, 950)
         self.session = None; self.state = Workflow(); self.worker = None
+        self._unsaved_edits = False
+        self._scene_drafts = {}
+        self._timeline_dirty = False
+        self._updating_timeline = False
+        self._undo_history = []
+        self._undo_group = None
+        self._undo_time = 0
+        self._worker_snapshot = None
         self.workspace_tabs = QTabWidget(); self.setCentralWidget(self.workspace_tabs)
         self.start = self.page('Start'); self.place = self.page('Place'); self.character = self.page('Character')
         self.scenes_page = self.page('Scenes'); self.stills_page = self.page('Stills'); self.video = self.page('Video Production')
@@ -54,7 +63,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.footer_status, 1)
         self.start.layout().addWidget(self.status)
         self.buttons(self.start, [('New Project', self.new_project), ('Open Project', self.open_project),
-            ('Import Prose', lambda:self.import_source('prose')), ('Link Narration Audio', lambda:self.import_source('audio')),
+            ('Import Prose', lambda:self.import_source('prose')), ('Link / Replace Narration Audio', lambda:self.import_source('audio')),
             ('Settings', lambda:self.settings())])
         self.buttons(self.start, [('Analyze Story', self.analyze), ('Cancel Work', self.cancel)])
         self.source_view = ProseViewer(); self.start.layout().addWidget(self.source_view)
@@ -64,6 +73,7 @@ class MainWindow(QMainWindow):
         for kind,page in [('Place',self.place),('Character',self.character)]:
             listing = QListWidget(); edit = QPlainTextEdit()
             self.catalog_lists[kind]=listing; self.catalog_edits[kind]=edit
+            edit.textChanged.connect(lambda k=kind:self.identity_edited(k))
             listing.currentRowChanged.connect(lambda _,k=kind:self.show_identity(k))
             if kind == 'Character':
                 page.layout().addWidget(QLabel('Characters participating in two or more included scenes.'))
@@ -92,7 +102,7 @@ class MainWindow(QMainWindow):
                 edit.setMaximumHeight(140)
             else:
                 details = page; details.layout().addWidget(listing)
-            details.layout().addWidget(QLabel('Canonical description')); details.layout().addWidget(edit)
+            details.layout().addWidget(QLabel('Canonical description · Edits save automatically')); details.layout().addWidget(edit)
             self.buttons(details, [('Add Identity',lambda _,k=kind:self.add_identity(k)),
                 ('Save Description' if kind == 'Place' else 'Save Description / References',lambda _,k=kind:self.save_identity(k)),
                 ('Import Reference',lambda _,k=kind:self.import_reference(k))])
@@ -118,6 +128,7 @@ class MainWindow(QMainWindow):
             edit = QPlainTextEdit(); edit.setMaximumHeight(100 if name=='final_prompt' else 65)
             if name in self.list_fields: edit.setToolTip('One item per line; identity links use catalog IDs')
             self.fields[name] = edit; form.addRow(name.replace('_',' ').capitalize(), edit)
+            edit.textChanged.connect(lambda n=name:self.scene_edited(n))
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(detail); split.addWidget(scroll)
         self.prompt_status = QLabel(); self.scenes_page.layout().addWidget(self.prompt_status)
         self.buttons(self.scenes_page,[('Save Scene',self.save_scene), ('Regenerate Prompt',self.regenerate),
@@ -141,14 +152,27 @@ class MainWindow(QMainWindow):
         self.video.layout().addWidget(QLabel('Edit display start/end in seconds. Adjust both sides of a shared boundary. Approximate rows use nearest matches or interpolation. Preview and adjust cuts; manual intervals survive rebuilds.'))
         self.video_actions[0].setToolTip('Use every included scene’s selected still and the full narration. Automatically aligns audio when needed; first use may download local speech models.')
         self.timeline = QTableWidget(0, 5)
+        self.timeline.itemChanged.connect(self.timeline_edited)
         self.timeline.setHorizontalHeaderLabels(['Scene', 'Display start', 'Display end', 'Speech / estimate start', 'Speech / estimate end'])
         self.timeline.horizontalHeader().setStretchLastSection(True)
         self.video.layout().addWidget(self.timeline)
         self.audio = AudioPlayer(); self.video.layout().addWidget(self.audio)
+        self.audio.waveform.boundary_moved.connect(self.move_still_boundary)
+        marker_help = QLabel('Drag the gold markers on the audio timeline to adjust where stills change. Changes are saved automatically.')
+        marker_help.setWordWrap(True)
+        self.video.layout().addWidget(marker_help)
         self.timeline_preview = QLabel(); self.timeline_preview.setMinimumHeight(220); self.video.layout().addWidget(self.timeline_preview)
         self.preview_timer = QTimer(self); self.preview_timer.timeout.connect(self.preview_timeline); self.preview_timer.start(100)
         self._preview_asset = None
         self.video_message = QLabel(); self.video_message.setWordWrap(True); self.video.layout().addWidget(self.video_message)
+        edit_menu = self.menuBar().addMenu('Edit')
+        self.undo_action = QAction('Undo', self)
+        self.undo_action.setShortcuts(QKeySequence.keyBindings(QKeySequence.Undo))
+        self.undo_action.setEnabled(False)
+        self.undo_action.triggered.connect(self.undo)
+        edit_menu.addAction(self.undo_action)
+        # Text editors normally consume Undo before window shortcuts see it.
+        QApplication.instance().installEventFilter(self)
         self.menuBar().addAction('Settings', lambda:self.settings())
         self.refresh()
         self._project_settings = QSettings('ProseToVideo', 'ProseToVideo')
@@ -180,16 +204,111 @@ class MainWindow(QMainWindow):
             buttons.append(button)
         return buttons
 
+    def edit_snapshot(self):
+        return {
+            'root': self.session.root if self.session else None,
+            'state': self.state.model_copy(deep=True),
+            'drafts': dict(self._scene_drafts),
+            'scene_row': self.scene_list.currentRow(),
+            'still_row': self.still_list.currentRow(),
+            'catalog_rows': {kind: listing.currentRow() for kind, listing in self.catalog_lists.items()},
+            'reference_index': self.character_reference_index,
+        }
+
+    def record_edit(self, before, group=None):
+        if not self.session or before['root'] != self.session.root:
+            return
+        if before['state'] == self.state and before['drafts'] == self._scene_drafts:
+            return
+        if self._undo_history:
+            latest = self._undo_history[-1]
+            if latest['state'] == before['state'] and latest['drafts'] == before['drafts']:
+                return
+        now = monotonic()
+        if group is None or group != self._undo_group or now - self._undo_time > 1:
+            self._undo_history.append(before)
+            del self._undo_history[:-100]
+        self._undo_group, self._undo_time = group, now
+        self.update_undo_action()
+
+    def update_undo_action(self):
+        self.undo_action.setEnabled(bool(self.session and not self.worker and
+                                        (self._undo_history or self._timeline_dirty)))
+
+    def eventFilter(self, watched, event):
+        if isinstance(watched, QWidget) and watched.window() is self:
+            # An open table cell has its own uncommitted text buffer.
+            if isinstance(watched, QLineEdit) and self.timeline.isAncestorOf(watched):
+                return super().eventFilter(watched, event)
+            if event.type() == QEvent.FocusOut:
+                self._undo_group = None
+            if event.type() in (QEvent.ShortcutOverride, QEvent.KeyPress) and event.matches(QKeySequence.Undo):
+                event.accept()
+                if event.type() == QEvent.KeyPress:
+                    self.undo()
+                return True
+        return super().eventFilter(watched, event)
+
+    def undo(self):
+        if not self.session or self.worker:
+            return
+        # Uncommitted boundary cells can be invalid as a pair; discard that draft
+        # without trying to validate or save it first.
+        if self._timeline_dirty:
+            self._timeline_dirty = False
+            self.refresh_timeline_table()
+            self._undo_group = None
+            self.update_undo_action()
+            self.message('Undid timeline edits.')
+            return
+        if not self._undo_history:
+            return
+        before = self._undo_history[-1]
+        restored = before['state'].model_copy(deep=True)
+        try:
+            restored.save(self.session.root)
+        except OSError as exc:
+            QMessageBox.warning(self, 'Could not undo change', str(exc))
+            return
+        self._undo_history.pop()
+        self.state = restored
+        self._scene_drafts = dict(before['drafts'])
+        self._unsaved_edits = False
+        self._undo_group = None
+        self._preview_asset = None
+        self.timeline_preview.clear()
+        self.refresh()
+        self.still_list.setCurrentRow(before['still_row'])
+        self.scene_list.setCurrentRow(before['scene_row'])
+        self.show_scene()
+        for kind, row in before['catalog_rows'].items():
+            self.catalog_lists[kind].setCurrentRow(row)
+            self.show_identity(kind)
+        self.character_reference_index = before['reference_index']
+        self.show_character_reference()
+        self.preview_timeline()
+        self.update_undo_action()
+        self.message('Change undone · Saved')
+
     def guarded(self,fn):
+        before = self.edit_snapshot() if not self.worker else None
+        self._undo_group = None
         try: return fn()
         except Exception as exc: QMessageBox.warning(self,'Prose to Video',str(exc))
+        finally:
+            if before is not None and not self.worker:
+                self.record_edit(before)
 
     def require(self):
         if not self.session: raise ValueError('Create or open a project first')
         if self.worker: raise ValueError('Wait for the current operation or cancel it')
+        self.flush_edits()
 
     def run(self,work,on_result=None,description='Background work'):
-        self.require(); self.worker=Task(work,self)
+        self.require()
+        self._worker_snapshot = self.edit_snapshot()
+        self.worker=Task(work,self)
+        self.update_undo_action()
         self.worker.description = description
         self.message(description + ' · Starting')
         self.worker.progress.connect(self.message)
@@ -202,6 +321,7 @@ class MainWindow(QMainWindow):
         for page in (self.place,self.character,self.scenes_page,self.stills_page): page.setEnabled(False)
         for button in self.video_actions[:-1]: button.setEnabled(False)
         self.timeline.setEnabled(False)
+        self.audio.waveform.set_boundaries_editable(False)
         self.timeline_mode.setEnabled(False)
 
     def message(self,msg):
@@ -222,7 +342,12 @@ class MainWindow(QMainWindow):
         for page in (self.place,self.character,self.scenes_page,self.stills_page): page.setEnabled(True)
         for button in self.video_actions[:-1]: button.setEnabled(True)
         self.timeline.setEnabled(True)
+        self.audio.waveform.set_boundaries_editable(True)
         self.timeline_mode.setEnabled(True)
+        if self._worker_snapshot is not None:
+            self.record_edit(self._worker_snapshot)
+            self._worker_snapshot = None
+        self.update_undo_action()
         self.refresh()
 
     def cancel(self):
@@ -245,8 +370,13 @@ class MainWindow(QMainWindow):
         self.guarded(work)
 
     def load(self,session):
+        self.flush_edits()
         state=load_workflow(session)
+        self._undo_history.clear()
+        self._undo_group = None
+        self._scene_drafts.clear()
         self.session=session; self.state=state; self.refresh()
+        self.update_undo_action()
         self.message(session.project.name + (' · '+ '; '.join(self.state.migration_notes) if self.state.migration_notes else ''))
         path = str(session.root.resolve())
         recent = self._project_settings.value('projects/recent', [], type=list)
@@ -254,6 +384,8 @@ class MainWindow(QMainWindow):
         self._project_settings.sync()
 
     def refresh(self):
+        if self.session and self._timeline_dirty:
+            self.commit_timeline_edits()
         scene_id=self.scene().identifier if self.scene() else None
         path=self.session.project.resolved_prose(self.session.root) if self.session else None
         if path:
@@ -276,6 +408,19 @@ class MainWindow(QMainWindow):
         if scene_id:
             self.scene_list.setCurrentRow(next((i for i,s in enumerate(self.state.scenes) if s.identifier==scene_id),0))
         self.timeline_mode.setCurrentIndex(self.timeline_mode.findData(self.state.timeline_mode))
+        self.refresh_timeline_table()
+        if self.session:
+            path=self.session.project.resolved_prose(self.session.root)
+            if path:
+                text=read_prose(path)
+                if self.state.prose_hash and source_hash(text)!=self.state.prose_hash:self.message('Prose changed; click Analyze Story to rebuild scenes, places, characters and prompts while keeping reference images')
+            audio=self.session.project.resolved_audio(self.session.root)
+            if audio != self.audio._loaded_path:
+                self.audio.set_audio(audio, self.session.project.audio_duration)
+        self.sync_timeline_markers()
+
+    def refresh_timeline_table(self):
+        self._updating_timeline = True
         self.timeline.setRowCount(len(self.state.timeline))
         for row, interval in enumerate(self.state.timeline):
             scene=next((s for s in self.state.scenes if s.identifier==interval.scene_id), None)
@@ -284,13 +429,36 @@ class MainWindow(QMainWindow):
                 item=QTableWidgetItem(str(value))
                 if col not in {1,2}:item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.timeline.setItem(row,col,item)
-        if self.session:
-            path=self.session.project.resolved_prose(self.session.root)
-            if path:
-                text=read_prose(path)
-                if self.state.prose_hash and source_hash(text)!=self.state.prose_hash:self.message('Prose changed; click Analyze Story to rebuild scenes, places, characters and prompts while keeping reference images')
-            audio=self.session.project.resolved_audio(self.session.root)
-            if audio:self.audio.set_audio(audio)
+        self._updating_timeline = False
+
+    def sync_timeline_markers(self):
+        intervals = self.state.timeline
+        self.audio.waveform.set_boundaries([intervals[0].start, *(t.end for t in intervals)] if intervals else [])
+        if intervals and self.audio.waveform.duration <= 0:
+            self.audio.waveform.set_data([], intervals[-1].end)
+
+    def move_still_boundary(self, index, seconds):
+        def work():
+            self.require()
+            values = [t.model_copy(deep=True) for t in self.state.timeline]
+            if not 0 < index < len(values):
+                return
+            left, right = values[index - 1:index + 1]
+            if left.end == right.start == seconds:
+                return
+            left.end = right.start = seconds
+            left.manual = right.manual = True
+            validate_timeline(values, self.session.project.audio_duration)
+            updated = self.state.model_copy(update={'timeline': values})
+            updated.save(self.session.root)
+            self.state = updated
+            self.refresh_timeline_table()
+            self.preview_timeline()
+            self.message(f'Still {index} → {index + 1} moved to {seconds:.3f}s · Saved')
+        try:
+            self.guarded(work)
+        finally:
+            self.sync_timeline_markers()
 
     def import_source(self,kind):
         def work():
@@ -300,19 +468,33 @@ class MainWindow(QMainWindow):
             def job(cancel,progress):
                 progress(f'Importing {kind}: {Path(path).name} · Copying the selected file into the project and checking its contents')
                 return (import_prose if kind=='prose' else import_audio)(session,Path(path))
-            self.run(job, self.source_imported, description=f'Import {kind}: {Path(path).name}')
+            self.run(job, lambda session:self.source_imported(session, kind),
+                description=f'Import {kind}: {Path(path).name}')
         self.guarded(work)
 
     @Slot(object)
-    def source_imported(self,session):
+    def source_imported(self,session,kind='prose'):
         self.session=session
+        if kind == 'audio':
+            # Qt otherwise keeps the old source open when the path is unchanged.
+            self.audio.set_audio(None)
+        # Source imports change project files outside the workflow sidecar.
+        self._undo_history.clear()
+        self._worker_snapshot = None
+        self.update_undo_action()
         self.refresh()
+        if kind == 'audio':
+            self._preview_asset = None
+            self.timeline_preview.clear()
+            self.message('Narration audio updated. In Video Production, build the timeline to align the new audio. '
+                         'Review any manual cuts afterward.')
 
     def settings(self, initial_tab=0):
         def work():
             if self.worker:
                 self.message('Wait for the current operation or cancel it before changing settings')
                 return
+            self.flush_edits()
             StillsSettingsWindow(self, initial_tab).exec()
         self.guarded(work)
 
@@ -337,7 +519,9 @@ class MainWindow(QMainWindow):
         return values[row] if 0<=row<len(values) else None
 
     def show_identity(self,kind):
-        c=self.identity(kind); self.catalog_edits[kind].setPlainText(c.description if c else '')
+        c=self.identity(kind)
+        with QSignalBlocker(self.catalog_edits[kind]):
+            self.catalog_edits[kind].setPlainText(c.description if c else '')
         if kind == 'Character':
             self.remove_character_button.setEnabled(
                 c is not None and self.session is not None and self.worker is None)
@@ -428,11 +612,10 @@ class MainWindow(QMainWindow):
             if not path:return
             # Reuse the existing image integrity/import service; no status filtering.
             from prose_to_video.storage.visual_library import VisualLibrary
-            self.run(lambda cancel,progress:VisualLibrary(self.session.root).import_image(Path(path)),
-                description=f'Import reference: {Path(path).name} · Checking and saving the image for {c.name}')
             def done(asset):
                 c.references.append(asset.path); self.state.save(self.session.root)
-            self.worker.result.connect(done)
+            self.run(lambda cancel,progress:VisualLibrary(self.session.root).import_image(Path(path)), done,
+                description=f'Import reference: {Path(path).name} · Checking and saving the image for {c.name}')
         self.guarded(work)
 
     def generate_reference(self):
@@ -458,10 +641,71 @@ class MainWindow(QMainWindow):
     def scene(self):
         row=self.scene_list.currentRow(); return self.state.scenes[row] if 0<=row<len(self.state.scenes) else None
 
+    def persist_edits(self):
+        self._unsaved_edits = True
+        try:
+            self.state.save(self.session.root)
+        except OSError as exc:
+            self.message(f'Changes are not saved: {exc}. Keep the app open and retry saving.')
+        else:
+            self._unsaved_edits = False
+
+    def flush_edits(self):
+        if self.session and self._timeline_dirty:
+            self.commit_timeline_edits()
+        if self._scene_drafts:
+            identifier, name = next(iter(self._scene_drafts))
+            scene = next(s for s in self.state.scenes if s.identifier == identifier)
+            raise ValueError(f'Scene {scene.sequence}: {scene.title} has an invalid {name.replace("_", " ")} value. '
+                             'Correct it in Scenes before closing or starting another operation.')
+        if self.session and self._unsaved_edits:
+            self.state.save(self.session.root)
+            self._unsaved_edits = False
+
+    def identity_edited(self, kind):
+        if not self.session or self.worker:
+            return
+        identity = self.identity(kind)
+        if identity:
+            before = self.edit_snapshot()
+            identity.description = self.catalog_edits[kind].toPlainText()
+            identity.manual = True
+            self.persist_edits()
+            self.record_edit(before, ('identity', identity.identifier))
+
+    def scene_edited(self, name):
+        if not self.session or self.worker:
+            return
+        scene = self.scene()
+        if not scene:
+            return
+        before = self.edit_snapshot()
+        text = self.fields[name].toPlainText()
+        value = text.splitlines() if name in self.list_fields else text
+        key = (scene.identifier, name)
+        try:
+            updated = Scene.model_validate(scene.model_dump() | {name: value})
+        except ValueError:
+            self._scene_drafts[key] = text
+            self.record_edit(before, ('scene', *key))
+            self.message(f'Changes to {name.replace("_", " ")} need a valid value before they can be saved.')
+            return
+        self._scene_drafts.pop(key, None)
+        if getattr(scene, name) != value:
+            updated.manual_fields = sorted(set(scene.manual_fields + [name]))
+            if name == 'final_prompt':
+                updated.prompt_dependency = dependency(self.state, updated)
+            self.state.scenes[self.scene_list.currentRow()] = updated
+            self.persist_edits()
+        self.record_edit(before, ('scene', *key))
+
     def show_scene(self,*_):
         s=self.scene()
         for name,edit in self.fields.items():
-            value=getattr(s,name) if s else ''; edit.setPlainText('\n'.join(value) if isinstance(value,list) else value or '')
+            value=getattr(s,name) if s else ''
+            text = '\n'.join(value) if isinstance(value,list) else value or ''
+            with QSignalBlocker(edit):
+                edit.setPlainText(self._scene_drafts.get((s.identifier, name), text) if s else text)
         if s and s.end <= len(self.prose._source_text):
             self.prose.highlight_range(s.start,s.end)
             self.prompt_status.setText(f'Exact prose [{s.start}:{s.end}] · source {s.source_version[:12]} · '+
@@ -600,9 +844,9 @@ class MainWindow(QMainWindow):
                 realign_review(self.session, self.state.scenes, run, dialog.draft,
                     cancel=cancel, progress=progress)
                 return assemble_timeline(self.session, self.state, cancel, progress)
-            self.run(apply, description='Review narration · Applying transcript corrections, realigning words and rebuilding the timeline')
-            self.worker.result.connect(lambda intervals:self.message(
-                f'Narration checked; timeline ready with {len(intervals)} stills. Play to preview or Export Video.'))
+            self.run(apply, lambda intervals:self.message(
+                f'Narration checked; timeline ready with {len(intervals)} stills. Play to preview or Export Video.'),
+                description='Review narration · Applying transcript corrections, realigning words and rebuilding the timeline')
         self.guarded(work)
 
     def build(self):
@@ -610,25 +854,43 @@ class MainWindow(QMainWindow):
             self.require()
             mode = self.timeline_mode.currentData()
             self.run(lambda cancel,progress:assemble_timeline(self.session,self.state,cancel,progress,timing_mode=mode),
+                lambda intervals:self.message(
+                    f"{'Approximate timeline' if any(t.estimated for t in intervals) else 'Timeline'} ready: "
+                    f'{len(intervals)} stills · {intervals[-1].end:.1f}s of narration. Preview and adjust cuts, or Export Video.'),
                 description='Build timeline · Checking selected stills and matching scene passages to narration')
-            self.worker.result.connect(lambda intervals:self.message(
-                f"{'Approximate timeline' if any(t.estimated for t in intervals) else 'Timeline'} ready: "
-                f'{len(intervals)} stills · {intervals[-1].end:.1f}s of narration. Preview and adjust cuts, or Export Video.'))
         self.guarded(work)
+
+    def timeline_edited(self, item):
+        if not self._updating_timeline and item.column() in {1, 2}:
+            self._timeline_dirty = True
+            self.update_undo_action()
 
     def save_timeline(self):
         def work():
-            self.require(); values=[t.model_copy(deep=True) for t in self.state.timeline]
-            for row, interval in enumerate(values):
-                interval.start=float(self.timeline.item(row,1).text())
-                interval.end=float(self.timeline.item(row,2).text())
-            if [t.scene_id for t in values]!=[t.scene_id for t in self.state.timeline]:raise ValueError('Preserve scene order and IDs')
-            validate_timeline(values,self.session.project.audio_duration)
-            for a,b in zip(values,self.state.timeline):
-                if (a.speech_start,a.speech_end)!=(b.speech_start,b.speech_end):raise ValueError('Speech spans come from alignment; edit display start/end only')
-                a.manual=b.manual or a.start!=b.start or a.end!=b.end
-            self.state.timeline=values; self.state.save(self.session.root); self.refresh()
+            self.require(); self.commit_timeline_edits(); self.refresh()
         self.guarded(work)
+
+    def commit_timeline_edits(self):
+        if not self._timeline_dirty:
+            return
+        before = self.edit_snapshot()
+        values=[t.model_copy(deep=True) for t in self.state.timeline]
+        for row, interval in enumerate(values):
+            interval.start=float(self.timeline.item(row,1).text())
+            interval.end=float(self.timeline.item(row,2).text())
+        if [t.scene_id for t in values]!=[t.scene_id for t in self.state.timeline]:raise ValueError('Preserve scene order and IDs')
+        validate_timeline(values,self.session.project.audio_duration)
+        for a,b in zip(values,self.state.timeline):
+            if (a.speech_start,a.speech_end)!=(b.speech_start,b.speech_end):raise ValueError('Speech spans come from alignment; edit display start/end only')
+            a.manual=b.manual or a.start!=b.start or a.end!=b.end
+        if values != self.state.timeline:
+            updated = self.state.model_copy(update={'timeline': values})
+            updated.save(self.session.root)
+            self.state = updated
+        self._timeline_dirty = False
+        self.record_edit(before)
+        self.update_undo_action()
+        self.sync_timeline_markers()
 
     def render(self):
         def work():
@@ -649,6 +911,12 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self,event):
         if self.worker:self.cancel(); event.ignore(); return
+        try:
+            self.flush_edits()
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, 'Could not save changes', str(exc))
+            event.ignore()
+            return
         self.preview_timer.stop()
         self.audio.set_audio(None)
         event.accept()

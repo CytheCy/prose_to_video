@@ -41,6 +41,10 @@ The GUI smoke test uses Qt's `offscreen` platform, so it does not require a visi
 1. In **Start**, create/open a project, import UTF-8 prose, optionally link narration,
    configure AI/image/export settings, and save a project visual style and image density.
    Imports preserve the original files. Re-import the active prose file after editing it to reload its changed text; other duplicate source filenames are rejected.
+   To replace edited narration, use **Link / Replace Narration Audio** and select
+   the edited file, including one with the same filename. Then rebuild the timeline
+   in Video Production and review any manual cuts. Scenes and still images are kept.
+
 2. **Analyze Story** first reads the whole story in bounded requests to establish
    character/place identities, then plans visual beats using validated sentence IDs,
    and writes staging and a self-contained TTI prompt for each scene. It does not
@@ -50,15 +54,18 @@ The GUI smoke test uses Qt's `offscreen` platform, so it does not require a visi
    images are preserved and reattached to matching character/place names or aliases;
    references for absent identities remain saved for future analysis.
 3. **Place** and **Character** contain canonical descriptions, stable IDs and optional
-   reference images. Character lists only people participating in more than one
+   reference images. Description edits save automatically. Character lists only people participating in more than one
    included scene, resolving aliases and unambiguous pronouns to the same person.
    One-off subjects remain available for scene staging and prompts. Select the references to condition
    generation and save. Absence of references never blocks text-only generation.
 4. **Scenes** is the authoritative editor for each still's original prose passage,
    identity links, description, staging, camera, lighting and final prompt. Select a
-   scene to highlight its exact passage. List fields use one entry per line. Save
-   manual edits; prompt regeneration is explicit. Select prose to split at its start,
+   scene to highlight its exact passage. List fields use one entry per line. Manual
+   edits save automatically; prompt regeneration is explicit. Select prose to split at its start,
    or merge with the next scene. Existing images remain available after restructuring.
+   Press **Ctrl+Z** (or choose **Edit → Undo**) to undo edits and project actions;
+   the restored state saves automatically. Undo history lasts until the project is closed
+   or source files are imported. Consecutive typing is grouped into one undo step.
 5. **Stills** generates selected/missing images, imports images, and selects candidates.
    The first successful result becomes usable immediately. Failed regeneration keeps
    the current selection. Metadata retains exact source ranges, prompt/request snapshot,
@@ -79,6 +86,8 @@ The GUI smoke test uses Qt's `offscreen` platform, so it does not require a visi
 The timeline table edits display start/end times in seconds. Adjust both sides of a shared boundary,
 then Save Timeline Edits. Manual intervals survive rebuilds; conflicting rebuilds fail
 without replacing the saved timeline.
+Closing the app also saves pending valid timeline edits. Invalid edits or save errors
+keep the window open so changes can be corrected or saving retried.
 
 **Nearest fit** is the default timing option in Video Production. Build Timeline uses
 verified word matches where possible, interpolates missing scene boundaries between

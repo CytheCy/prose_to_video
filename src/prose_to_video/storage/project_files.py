@@ -115,8 +115,8 @@ def _import_file(session: ProjectSession, source: Path, kind: str) -> ProjectSes
     if not source_dir.is_dir() or not source_dir.resolve().is_relative_to(session.root.resolve()):
         raise ProjectError("Project source directory is missing or invalid")
     destination = source_dir / source.name
-    replacing_prose = kind == "prose" and session.project.prose_path == f"source/{source.name}"
-    if destination.exists() and not replacing_prose:
+    replacing_current = getattr(session.project, f"{kind}_path") == f"source/{source.name}"
+    if destination.exists() and not replacing_current:
         raise ProjectError(f"A source file named {source.name} already exists in this project")
 
     temporary: Path | None = None
@@ -141,15 +141,15 @@ def _import_file(session: ProjectSession, source: Path, kind: str) -> ProjectSes
                 "audio_codec": info.codec, "audio_sample_rate": info.sample_rate,
                 "audio_channels": info.channels,
             }
-        if destination.exists() and not replacing_prose:
+        if destination.exists() and not replacing_current:
             raise ProjectError(f"A source file named {source.name} already exists in this project")
-        if replacing_prose and destination.exists():
+        if replacing_current and destination.exists():
             # Keep the old copy until both the replacement and metadata save succeed.
             previous = temporary.with_name(temporary.name + ".previous")
             os.link(destination, previous)
             os.replace(temporary, destination)
         else:
-            # Unrelated source files (including audio) must never be overwritten.
+            # Unrelated or inactive source files must never be overwritten.
             os.link(temporary, destination)
         committed = True
         updated = _fresh(session.project, **changes)

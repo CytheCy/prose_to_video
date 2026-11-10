@@ -6,8 +6,8 @@ import subprocess
 from array import array
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
 from prose_to_video.models.alignment import SceneTiming
@@ -58,6 +58,7 @@ def waveform_peaks(audio: Path, cache_dir: Path) -> list[float]:
 class Waveform(QWidget):
     seek_requested = Signal(float)
     scene_selected = Signal(str)
+    boundary_moved = Signal(int, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -66,6 +67,48 @@ class Waveform(QWidget):
         self.duration = 0.0
         self.position = 0.0
         self.timings: list[SceneTiming] = []
+        self.boundaries: list[float] = []
+        self.boundaries_editable = True
+        self._drag_boundary: int | None = None
+        self._drag_start_x = 0.0
+        self._drag_start_seconds = 0.0
+        self.setMouseTracking(True)
+
+    def set_boundaries(self, boundaries: list[float]) -> None:
+        """Display interval endpoints; only interior endpoints can be moved."""
+        self.boundaries = list(boundaries)
+        self._drag_boundary = None
+        self.update()
+
+    def set_boundaries_editable(self, editable: bool) -> None:
+        self.boundaries_editable = editable
+        self._drag_boundary = None
+        self.unsetCursor()
+
+    def _boundary_at(self, x: float) -> int | None:
+        if self.duration <= 0 or not self.boundaries_editable:
+            return None
+        candidates = range(1, len(self.boundaries) - 1)
+        nearest = min(candidates, key=lambda i: abs(self.boundaries[i] / self.duration * self.width() - x), default=None)
+        if nearest is not None and abs(self.boundaries[nearest] / self.duration * self.width() - x) <= 8:
+            return nearest
+        return None
+
+    def _drag_to(self, x: float) -> None:
+        i = self._drag_boundary
+        if i is None:
+            return
+        # Keep both neighboring stills nonempty and all other cuts fixed.
+        lower, upper = self.boundaries[i - 1] + .001, self.boundaries[i + 1] - .001
+        if lower > upper:
+            return
+        if x == self._drag_start_x:
+            self.boundaries[i] = self._drag_start_seconds
+            self.update()
+            return
+        seconds = round(self._drag_start_seconds + (x - self._drag_start_x) / max(1, self.width()) * self.duration, 3)
+        self.boundaries[i] = max(lower, min(upper, seconds))
+        self.update()
 
     def set_data(self, peaks: list[float], duration: float) -> None:
         self.peaks, self.duration = peaks, duration
@@ -80,7 +123,13 @@ class Waveform(QWidget):
         self.update()
 
     def mousePressEvent(self, event) -> None:
-        if self.duration <= 0:
+        if self.duration <= 0 or event.button() != Qt.LeftButton:
+            return
+        self._drag_boundary = self._boundary_at(event.position().x())
+        if self._drag_boundary is not None:
+            self._drag_start_x = event.position().x()
+            self._drag_start_seconds = self.boundaries[self._drag_boundary]
+            self.setCursor(Qt.SizeHorCursor)
             return
         seconds = max(0, min(self.duration, event.position().x() / max(1, self.width()) * self.duration))
         self.seek_requested.emit(seconds)
@@ -88,6 +137,22 @@ class Waveform(QWidget):
             if timing.audio_start is not None and timing.audio_start <= seconds <= timing.audio_end:
                 self.scene_selected.emit(timing.scene_id)
                 break
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_boundary is not None:
+            self._drag_to(event.position().x())
+            return
+        i = self._boundary_at(event.position().x())
+        self.setCursor(Qt.SizeHorCursor if i is not None else Qt.ArrowCursor)
+        self.setToolTip(f'Still {i} → {i + 1}: {self.boundaries[i]:.3f}s · Drag to adjust' if i is not None else '')
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self._drag_boundary is not None:
+            self._drag_to(event.position().x())
+            i = self._drag_boundary
+            self._drag_boundary = None
+            self.boundary_moved.emit(i, self.boundaries[i])
+            self.unsetCursor()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -116,6 +181,16 @@ class Waveform(QWidget):
                     x = int(second / self.duration * width)
                     painter.setPen(QPen(QColor(color), 2))
                     painter.drawLine(x, 0, x, height - 20)
+            for i, second in enumerate(self.boundaries):
+                x = int(second / self.duration * width)
+                painter.setPen(QPen(QColor('#f5ae59'), 2))
+                painter.drawLine(x, 0, x, height - 20)
+                if 0 < i < len(self.boundaries) - 1:
+                    painter.setBrush(QColor('#ffffff' if i == self._drag_boundary else '#f5ae59'))
+                    painter.drawPolygon(QPolygonF([QPointF(x - 6, 0), QPointF(x + 6, 0), QPointF(x + 6, 9), QPointF(x, 15), QPointF(x - 6, 9)]))
+                    painter.drawText(x + 8, 13, f'{i} → {i + 1}')
+                    if i == self._drag_boundary:
+                        painter.drawText(max(2, min(x + 8, width - 90)), 30, f'{second:.3f}s')
             painter.setPen(QPen(QColor("#ff6b6b"), 2))
             x = int(self.position / self.duration * width)
             painter.drawLine(x, 0, x, height)
