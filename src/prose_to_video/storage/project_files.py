@@ -220,3 +220,15 @@ def import_world_building_files(session: ProjectSession, sources: list[Path]) ->
             destination.unlink(missing_ok=True)
         raise ProjectError(f"Could not add world building files: {exc}") from exc
     return world_building_files(session)
+
+
+def remove_world_building_file(session: ProjectSession, name: str) -> list[Path]:
+    files = world_building_files(session)
+    target = next((path for path in files if path.name == name), None)
+    if target is None:
+        raise ProjectError("The selected world building file is no longer in the project")
+    try:
+        target.unlink()
+    except OSError as exc:
+        raise ProjectError(f"Could not delete world building file: {exc}") from exc
+    return world_building_files(session)

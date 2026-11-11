@@ -6,7 +6,7 @@ import json
 import logging
 from uuid import uuid4
 from PySide6.QtCore import QThread, Signal, Slot, Qt, QUrl, QTimer, QSignalBlocker, QSettings, QEvent
-from PySide6.QtGui import QPixmap, QDesktopServices, QAction, QKeySequence
+from PySide6.QtGui import QPixmap, QDesktopServices, QAction, QKeySequence, QPainter
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QPlainTextEdit, QListWidget, QFormLayout, QScrollArea, QSplitter,
     QFileDialog, QInputDialog, QMessageBox, QDialog, QDialogButtonBox, QComboBox, QTableWidget, QTableWidgetItem, QLineEdit)
@@ -14,7 +14,7 @@ from prose_to_video.pipeline.stills_workflow import (Workflow, Identity, Interva
     analyze, dependency, regenerate_prompt, generate_still, store_still, assemble_timeline,
     validate_timeline, render_plan, listed_identities, generate_character_reference)
 from prose_to_video.storage.project_files import (create_project, open_project, import_prose, import_audio,
-    import_world_building_files, world_building_files)
+    import_world_building_files, remove_world_building_file, world_building_files)
 from prose_to_video.utils.prose import read_prose
 from prose_to_video.models.scene import Scene, source_hash
 from prose_to_video.gui.prose_viewer import ProseViewer
@@ -26,6 +26,19 @@ from prose_to_video.pipeline.providers import make_provider
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+class WorldBuildingList(QListWidget):
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.count() == 0:
+            painter = QPainter(self.viewport())
+            font = painter.font()
+            font.setItalic(True)
+            painter.setFont(font)
+            painter.setPen(self.palette().color(self.foregroundRole()))
+            painter.drawText(self.viewport().rect(), Qt.AlignCenter,
+                             'Recomended: custom world build file.')
 
 
 class Task(QThread):
@@ -72,9 +85,14 @@ class MainWindow(QMainWindow):
             ('Analyze Story', self.analyze),
             ('Stop Analyzing', self.cancel)], vertical=True)
         self.buttons(start_controls, [('Add World Building Files', self.add_world_building_files)], vertical=True)
-        self.world_building_list = QListWidget()
+        self.world_building_list = WorldBuildingList()
         self.world_building_list.setMaximumHeight(110)
         start_controls.layout().addWidget(self.world_building_list)
+        self.delete_world_building_button = QPushButton('Delete Selected File')
+        self.delete_world_building_button.setEnabled(False)
+        self.delete_world_building_button.clicked.connect(self.delete_world_building_file)
+        self.world_building_list.currentItemChanged.connect(self.update_world_building_delete_button)
+        start_controls.layout().addWidget(self.delete_world_building_button)
         start_controls.layout().addStretch()
         start_split.addWidget(start_controls)
         self.source_view = ProseViewer(); start_split.addWidget(self.source_view)
@@ -327,6 +345,7 @@ class MainWindow(QMainWindow):
         self._worker_snapshot = self.edit_snapshot()
         self.worker=Task(work,self)
         self.update_undo_action()
+        self.update_world_building_delete_button()
         self.worker.description = description
         self.message(description + ' · Starting')
         self.worker.progress.connect(self.message)
@@ -357,6 +376,7 @@ class MainWindow(QMainWindow):
 
     def finished(self):
         self.worker.deleteLater(); self.worker=None
+        self.update_world_building_delete_button()
         for page in (self.place,self.character,self.scenes_page,self.stills_page): page.setEnabled(True)
         for button in self.video_actions[:-1]: button.setEnabled(True)
         self.timeline.setEnabled(True)
@@ -408,6 +428,7 @@ class MainWindow(QMainWindow):
         if self.session:
             for path in world_building_files(self.session):
                 self.world_building_list.addItem(path.name)
+        self.update_world_building_delete_button()
         scene_id=self.scene().identifier if self.scene() else None
         path=self.session.project.resolved_prose(self.session.root) if self.session else None
         if path:
@@ -507,6 +528,27 @@ class MainWindow(QMainWindow):
             for path in files:
                 self.world_building_list.addItem(path.name)
             self.message(f'{len(files)} world building file(s) in project')
+        self.guarded(work)
+
+    def update_world_building_delete_button(self):
+        self.delete_world_building_button.setEnabled(bool(
+            self.session and self.world_building_list.currentItem() and not self.worker))
+
+    def delete_world_building_file(self):
+        def work():
+            self.require()
+            item = self.world_building_list.currentItem()
+            if item is None:
+                return
+            name = item.text()
+            if QMessageBox.question(self, f'Delete {name}', 'Are you sure?',
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+            files = remove_world_building_file(self.session, name)
+            self.world_building_list.clear()
+            for path in files:
+                self.world_building_list.addItem(path.name)
+            self.message(f'{name} deleted from world building files')
         self.guarded(work)
 
     @Slot(object)
