@@ -259,6 +259,51 @@ def test_timeline_holds_pauses_leading_trailing_and_manual():
     assert state.timeline[0].end==5
 
 
+def test_timeline_validation_identifies_bad_cut():
+    from prose_to_video.pipeline.stills_workflow import validate_timeline
+    timeline = [Interval(scene_id='a', start=0, end=5, speech_start=1, speech_end=2),
+                Interval(scene_id='b', start=5.1, end=10, speech_start=6, speech_end=7)]
+    with pytest.raises(ValueError, match=r'Still 2 starts at 5\.100s.*5\.000s'):
+        validate_timeline(timeline, 10)
+    timeline[1].start = 5
+    timeline[1].end = 10.1
+    with pytest.raises(ValueError, match=r'Still 2 ends at 10\.100s.*10\.000s'):
+        validate_timeline(timeline, 10)
+
+
+def test_render_plan_uses_current_audio_duration(tmp_path):
+    import wave
+    from prose_to_video.storage.project_files import import_audio
+    from prose_to_video.pipeline.audio_transcription import source_file_hash
+    from prose_to_video.pipeline.stills_workflow import render_plan
+    session = session_with_text(tmp_path, 'A B')
+    source = tmp_path / 'narration.wav'
+    with wave.open(str(source), 'wb') as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(16000)
+        audio.writeframes(b'\0\0' * 16000)
+    session = import_audio(session, source)
+    state, run = timeline_fixture()
+    state.prose_hash = source_hash('A B')
+    state.timeline_audio_hash = source_file_hash(session.project.resolved_audio(session.root))
+    state.timeline = [Interval(scene_id='a', start=0, end=.5, speech_start=.1, speech_end=.3),
+                      Interval(scene_id='b', start=.5, end=1, speech_start=.6, speech_end=.9)]
+    (session.root / 'images').mkdir(exist_ok=True)
+    (session.root / 'images/a.png').write_bytes(b'image')
+    stale_session = type(session)(session.root, session.project.model_copy(update={'audio_duration': .9}))
+    plan = render_plan(stale_session, state)
+    assert plan.audio_duration == plan.source_end == 1
+    state.timeline_audio_hash = 'previous-audio'
+    with pytest.raises(ValueError, match='Audio changed'):
+        render_plan(stale_session, state)
+    with pytest.raises(ValueError, match='Audio changed'):
+        render_plan(stale_session, state, approved_audio_hash='another-audio')
+    approved = render_plan(stale_session, state, approved_audio_hash=plan.audio_fingerprint)
+    assert approved.audio_fingerprint == plan.audio_fingerprint
+    assert [(t.start, t.end) for t in state.timeline] == [(0, .5), (.5, 1)]
+
+
 def test_unmatched_narration_blocks_precise_timeline():
     state,run=timeline_fixture();run.words[1]=WordAlignment(source_start=2,source_end=3,text='B')
     with pytest.raises(ValueError,match='unmatched'):build_timeline(state,run,'audio')

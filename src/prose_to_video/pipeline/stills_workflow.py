@@ -985,23 +985,33 @@ def build_nearest_timeline(state, alignment, audio_hash):
 
 
 def validate_timeline(timeline, duration):
-    pos = 0
-    for t in timeline:
-        if not all(math.isfinite(v) for v in (t.start,t.end)) or abs(t.start-pos)>1e-6 or t.end<=t.start or t.end>duration:
-            raise ValueError('Timeline must be contiguous and within audio duration. Adjust manual boundaries; saved work was preserved.')
+    if duration is None or not math.isfinite(duration) or duration <= 0:
+        raise ValueError('Narration duration is unavailable; relink the audio')
+    pos = 0.0
+    for index, t in enumerate(timeline, 1):
+        if not all(math.isfinite(v) for v in (t.start, t.end)):
+            raise ValueError(f'Still {index} has a non-finite timeline boundary. Correct its Start and End values; saved work was preserved.')
+        if abs(t.start-pos)>1e-6:
+            raise ValueError(f'Still {index} starts at {t.start:.3f}s, but the preceding still ends at {pos:.3f}s. Set both sides of the cut to the same time; saved work was preserved.')
+        if t.end<=t.start:
+            raise ValueError(f'Still {index} ends at {t.end:.3f}s, before its start at {t.start:.3f}s. Correct this interval; saved work was preserved.')
+        if t.end>duration+1e-6:
+            raise ValueError(f'Still {index} ends at {t.end:.3f}s, past the narration end at {duration:.3f}s. Correct this interval; saved work was preserved.')
         pos = t.end
-    if abs(pos-duration)>1e-6: raise ValueError('Timeline must cover leading and trailing audio')
+    if abs(pos-duration)>1e-6:
+        raise ValueError(f'Timeline ends at {pos:.3f}s, but narration ends at {duration:.3f}s. Rebuild the timeline or correct the last interval; saved work was preserved.')
 
 
-def render_plan(session, state):
+def render_plan(session, state, *, approved_audio_hash=None):
     audio = session.project.resolved_audio(session.root)
     if not audio: raise ValueError('Link narration audio first')
     digest = source_file_hash(audio)
-    if digest != state.timeline_audio_hash: raise ValueError('Audio changed; align and rebuild timeline')
+    if digest != state.timeline_audio_hash and digest != approved_audio_hash:
+        raise ValueError('Audio changed; align and rebuild timeline, or choose Export anyway')
     if source_hash(read_prose(session.project.resolved_prose(session.root))) != state.prose_hash:
         raise ValueError('Prose changed; timeline is out of date')
-    duration = session.project.audio_duration
-    if not duration: raise ValueError('Narration duration unavailable; relink audio')
+    from prose_to_video.utils.media_info import inspect_audio
+    duration = inspect_audio(audio).duration
     validate_timeline(state.timeline, duration)
     settings = state.render_settings; segments = []
     for t in state.timeline:

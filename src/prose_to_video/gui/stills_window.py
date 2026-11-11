@@ -199,6 +199,7 @@ class MainWindow(QMainWindow):
         self.timeline.itemChanged.connect(self.timeline_edited)
         self.timeline.setHorizontalHeaderLabels(['Scene', 'Display start', 'Display end', 'Speech / estimate start', 'Speech / estimate end'])
         self.timeline.horizontalHeader().setStretchLastSection(True)
+        self.video.layout().addWidget(self.timeline)
         self.audio = AudioPlayer(); self.video.layout().addWidget(self.audio)
         self.audio.position_seconds.connect(self.update_video_preview)
         self.audio.waveform.boundary_moved.connect(self.move_still_boundary)
@@ -1111,12 +1112,28 @@ class MainWindow(QMainWindow):
 
     def render(self):
         def work():
-            self.require(); path,_=QFileDialog.getSaveFileName(self,'Export video',str(self.session.root/'output'/'video.mp4'),'MP4 (*.mp4)')
+            self.require()
+            from prose_to_video.pipeline.audio_transcription import source_file_hash
+            audio = self.session.project.resolved_audio(self.session.root)
+            if not audio: raise ValueError('Link narration audio first')
+            current_audio_hash = source_file_hash(audio)
+            approved_audio_hash = None
+            if current_audio_hash != self.state.timeline_audio_hash:
+                # Check timing and assets before asking the user to approve this audio.
+                plan = render_plan(self.session, self.state, approved_audio_hash=current_audio_hash)
+                answer = QMessageBox.question(self, 'Export anyway?',
+                    f'Audio changed since the timeline was built. The saved cuts cover the current '
+                    f'{plan.audio_duration:.3f}s narration. Export anyway with this audio and these cuts?',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if answer != QMessageBox.Yes:
+                    return
+                approved_audio_hash = current_audio_hash
+            path,_=QFileDialog.getSaveFileName(self,'Export video',str(self.session.root/'output'/'video.mp4'),'MP4 (*.mp4)')
             if not path:return
             def job(cancel,progress):
                 from prose_to_video.rendering.ffmpeg_renderer import FFmpegRenderer
                 progress('Preparing video export · Checking scene images, timing, narration and render settings')
-                plan=render_plan(self.session,self.state)
+                plan=render_plan(self.session,self.state,approved_audio_hash=approved_audio_hash)
                 metadata=FFmpegRenderer(self.session.root).render(plan,Path(path),cancel=cancel,progress=lambda stage,seconds:progress(f'Exporting {Path(path).name} · {stage}: {seconds:.1f}s processed of {plan.audio_duration:.1f}s'))
                 Path(path+'.json').write_text(plan.model_dump_json(indent=2),encoding='utf-8'); return metadata
             self.run(job, description=f'Export video: {Path(path).name}')
