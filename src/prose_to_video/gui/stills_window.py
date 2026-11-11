@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QTabWidget, Q
     QFileDialog, QInputDialog, QMessageBox, QDialog, QDialogButtonBox, QComboBox, QTableWidget, QTableWidgetItem, QLineEdit)
 from prose_to_video.pipeline.stills_workflow import (Workflow, Identity, Interval, load_workflow,
     analyze, dependency, regenerate_prompt, generate_still, store_still, assemble_timeline,
-    validate_timeline, render_plan, listed_identities, generate_character_reference)
+    validate_timeline, render_plan, listed_identities, generate_character_reference, set_world_prompt,
+    WORLD_PROMPT_LIMIT)
 from prose_to_video.storage.project_files import (create_project, open_project, import_prose, import_audio,
     import_world_building_files, remove_world_building_file, world_building_files)
 from prose_to_video.utils.prose import read_prose
@@ -133,6 +134,8 @@ class MainWindow(QMainWindow):
                 edit.setMaximumHeight(140)
             else:
                 details = page; details.layout().addWidget(listing)
+                self.world_prompt_count = QLabel()
+                details.layout().addWidget(self.world_prompt_count)
             details.layout().addWidget(QLabel('Canonical description · Edits save automatically')); details.layout().addWidget(edit)
             self.buttons(details, [('Add Identity',lambda _,k=kind:self.add_identity(k)),
                 ('Save Description' if kind == 'Place' else 'Save Description / References',lambda _,k=kind:self.save_identity(k)),
@@ -440,9 +443,12 @@ class MainWindow(QMainWindow):
             values = listed_identities(self.state, kind)
             with QSignalBlocker(listing):
                 listing.clear()
+                if kind == 'Place' and self.state.world_prompt:
+                    listing.addItem('World Building Prompt')
                 for c in values:listing.addItem(c.name if kind == 'Character' else c.name+' · '+c.identifier)
-                row = next((i for i,c in enumerate(values) if previous and c.identifier == previous.identifier), 0)
-                listing.setCurrentRow(row if values else -1)
+                offset = 1 if kind == 'Place' and self.state.world_prompt else 0
+                row = next((i + offset for i,c in enumerate(values) if previous and c.identifier == previous.identifier), 0)
+                listing.setCurrentRow(row if listing.count() else -1)
             self.show_identity(kind)
         self.scene_list.clear(); self.still_list.clear()
         for s in self.state.scenes:
@@ -595,12 +601,22 @@ class MainWindow(QMainWindow):
 
     def identity(self,kind):
         values=listed_identities(self.state, kind); row=self.catalog_lists[kind].currentRow()
+        if kind == 'Place' and self.catalog_lists['Place'].count() and self.catalog_lists['Place'].item(0).text() == 'World Building Prompt':
+            row -= 1
         return values[row] if 0<=row<len(values) else None
+
+    def world_prompt_selected(self):
+        listing = self.catalog_lists['Place']
+        return bool(listing.count() and listing.currentRow() == 0 and listing.item(0).text() == 'World Building Prompt')
 
     def show_identity(self,kind):
         c=self.identity(kind)
         with QSignalBlocker(self.catalog_edits[kind]):
-            self.catalog_edits[kind].setPlainText(c.description if c else '')
+            self.catalog_edits[kind].setPlainText(c.description if c else
+                self.state.world_prompt if kind == 'Place' and self.world_prompt_selected() else '')
+        if kind == 'Place':
+            selected = self.world_prompt_selected()
+            self.world_prompt_count.setText(f'World building prompt: {len(self.state.world_prompt)}/{WORLD_PROMPT_LIMIT} characters' if selected else '')
         if kind == 'Character':
             self.remove_character_button.setEnabled(
                 c is not None and self.session is not None and self.worker is None)
@@ -678,6 +694,10 @@ class MainWindow(QMainWindow):
     def save_identity(self,kind):
         def work():
             self.require(); c=self.identity(kind)
+            if kind == 'Place' and self.world_prompt_selected():
+                set_world_prompt(self.state, self.catalog_edits[kind].toPlainText())
+                self.state.save(self.session.root)
+                return
             if not c:return
             c.description=self.catalog_edits[kind].toPlainText(); c.manual=True
             self.state.save(self.session.root)
@@ -745,6 +765,24 @@ class MainWindow(QMainWindow):
         if not self.session or self.worker:
             return
         identity = self.identity(kind)
+        if kind == 'Place' and self.world_prompt_selected():
+            edit = self.catalog_edits[kind]
+            value = edit.toPlainText()
+            if len(value) > WORLD_PROMPT_LIMIT:
+                cursor = edit.textCursor()
+                position = cursor.position()
+                value = value[:WORLD_PROMPT_LIMIT]
+                with QSignalBlocker(edit):
+                    edit.setPlainText(value)
+                cursor = edit.textCursor()
+                cursor.setPosition(min(position, WORLD_PROMPT_LIMIT))
+                edit.setTextCursor(cursor)
+            before = self.edit_snapshot()
+            set_world_prompt(self.state, value)
+            self.world_prompt_count.setText(f'World building prompt: {len(self.state.world_prompt)}/{WORLD_PROMPT_LIMIT} characters')
+            self.persist_edits()
+            self.record_edit(before, ('world_prompt',))
+            return
         if identity:
             before = self.edit_snapshot()
             identity.description = self.catalog_edits[kind].toPlainText()

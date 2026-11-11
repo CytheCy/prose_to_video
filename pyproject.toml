@@ -12,6 +12,7 @@ dependencies = [
   "PySide6-Addons>=6.8,<7",
   "pydantic>=2.9,<3",
   "openai>=3,<4",
+  "pypdf>=5,<7",
 ]
 
 [project.optional-dependencies]

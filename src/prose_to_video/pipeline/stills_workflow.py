@@ -85,6 +85,8 @@ class Workflow(Record):
     version: int = 2
     prose_hash: str = ''
     style: str = 'Cohesive, restrained illustrated story'
+    world_prompt: str = ''
+    world_building_hash: str = ''
     density: Literal['Low', 'Medium', 'High'] = 'Medium'
     scene_detection: Literal['ai', 'paragraph'] = 'ai'
     analysis_scene_detection: Literal['ai', 'paragraph'] = 'ai'
@@ -207,6 +209,59 @@ class CatalogResult(Record):
     identities: list[Identity]
 
 
+class WorldPromptResult(Record):
+    prompt: str = Field(min_length=1)
+
+
+WORLD_PROMPT_LIMIT = 750
+
+
+def world_building_content(session):
+    """Read the project copies, including text embedded in PDF reference files."""
+    from prose_to_video.storage.project_files import world_building_files
+    content = []
+    for path in world_building_files(session):
+        if path.suffix.casefold() == '.pdf':
+            from pypdf import PdfReader
+            body = '\n'.join(page.extract_text() or '' for page in PdfReader(str(path)).pages)
+        elif path.suffix.casefold() == '.docx':
+            from zipfile import ZipFile
+            from xml.etree import ElementTree
+            with ZipFile(path) as document:
+                root = ElementTree.fromstring(document.read('word/document.xml'))
+            ns = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+            body = '\n'.join(''.join(node.text or '' for node in paragraph.iter(ns + 't'))
+                             for paragraph in root.iter(ns + 'p'))
+        else:
+            body = read_prose(path)
+        if not body.strip():
+            raise ValueError(f'World building file {path.name} contains no extractable text')
+        content.append({'name': path.name, 'text': body})
+    return content
+
+
+def scene_location(world_prompt, location):
+    """Keep the shared world description ahead of the scene's specific place."""
+    world_prompt = world_prompt.strip()
+    location = (location or '').strip()
+    if world_prompt and location.startswith(world_prompt):
+        return location
+    return '\n'.join(part for part in (world_prompt, location) if part)
+
+
+def set_world_prompt(state, prompt):
+    if len(prompt.strip()) > WORLD_PROMPT_LIMIT:
+        raise ValueError(f'World building prompt cannot exceed {WORLD_PROMPT_LIMIT} characters')
+    old_prompt = state.world_prompt.strip()
+    state.world_prompt = prompt.strip()
+    for scene in state.scenes:
+        specific = (scene.location or '').strip()
+        if old_prompt and specific.startswith(old_prompt):
+            specific = specific[len(old_prompt):].lstrip('\n').strip()
+        scene.location = scene_location(state.world_prompt, specific)
+        scene.prompt_dependency = dependency(state, scene)
+
+
 def listed_identities(state, kind=None):
     """List places and characters participating in at least two distinct scenes.
 
@@ -288,6 +343,8 @@ Distinguish observer's physical location from remote screens, memories and other
 never put offstage people in frame. No invented plot facts. Restrained consistent design
 choices are allowed for unspecified appearance. Final prompt must be self-contained, repeat
 essential identity/place traits rather than relying on fictional names or references.
+When a shared world prompt is supplied, carry its visual era, materials and mood into
+the final prompt and location, while keeping the scene's specific setting clear.
 Include the supplied project style and aspect ratio. No generic masterpiece adjective lists,
 unintended text, captions, watermarks, collages or contradictory staging.
 Do not put administrative fields such as boundary_reason in the prompt.
@@ -355,7 +412,7 @@ def paragraph_spans(text):
 def dependency(state, scene):
     data = scene.model_dump(exclude={'final_prompt', 'negative_prompt', 'prompt_dependency', 'manual_fields'})
     return source_hash(json.dumps([data, state.style, state.image_settings.width, state.image_settings.height,
-        [c.model_dump() for c in state.catalogs if c.identifier in scene.identity_links]], sort_keys=True))
+        state.world_prompt, [c.model_dump() for c in state.catalogs if c.identifier in scene.identity_links]], sort_keys=True))
 
 
 def prose_ranges(text, ranges, heading_ranges):
@@ -439,6 +496,32 @@ def analyze(session, state, provider, settings, cancel=None, progress=lambda *_:
     def discard_invalid(result):
         invalid = result.model_dump()
         state.checkpoints = {k:v for k,v in state.checkpoints.items() if v != invalid}
+        state.save(session.root)
+    files = world_building_content(session)
+    files_hash = source_hash(json.dumps(files, sort_keys=True)) if files else ''
+    if files_hash != state.world_building_hash:
+        if files:
+            instructions = '''Extracting World-Building Details for Text-to-Image Prompt.
+Read every supplied world building file as context for the same story world. Return one compact,
+visual prompt that can be reused across many generated images. Synthesize the overall feel:
+place, era, architecture, materials, palette, light, atmosphere and visual mood where supported.
+Favor recurring or defining traits over isolated mentions. Do not list individual places,
+characters, events, or plot details. Do not invent unsupported specifics.
+Aim for 300–500 characters. The absolute maximum is 750 characters, including spaces.'''
+            for attempt in range(2):
+                result = request(f'world-building-{attempt}', instructions,
+                    {'files': files}, WorldPromptResult, 'Places · Extracting the shared world building prompt')
+                new_prompt = result.prompt.strip()
+                if new_prompt and len(new_prompt) <= WORLD_PROMPT_LIMIT:
+                    break
+                discard_invalid(result)
+                if attempt == 1:
+                    raise ValueError(f'AI did not return a world building prompt within {WORLD_PROMPT_LIMIT} characters; retry analysis')
+                instructions += '\nYour previous response exceeded the limit or was empty. Rewrite it more concisely.'
+        else:
+            new_prompt = ''
+        set_world_prompt(state, new_prompt)
+        state.world_building_hash = files_hash
         state.save(session.root)
     # Catalog pass reads the entire manuscript before the scene pass.
     for number, batch in enumerate(batches):
@@ -563,6 +646,7 @@ Do not invent events or relationships. Use existing IDs for existing identities.
             content = {'prose': _scene_prose(text, start, end, heading_ranges),
                 'earlier_context': _scene_prose(text, max(0,start-settings.overlap_chars), start, heading_ranges),
                 'catalog': [c.model_dump() for c in state.catalogs], 'style': state.style,
+                'world_prompt': state.world_prompt,
                 'aspect_ratio': f'{state.image_settings.width}:{state.image_settings.height}'}
             for attempt in range(3):
                 result = request(f'scene-{start}-{end}', ART_DIRECTION + '\n' + IDENTITY_LINKS,
@@ -585,6 +669,7 @@ Do not invent events or relationships. Use existing IDs for existing identities.
         else: data = {'title': 'Excluded manuscript material'}
         scene = Scene(sequence=sequence, start=start, end=end, text=text[start:end],
             source_version=digest, production_included=included, **data)
+        scene.location = scene_location(state.world_prompt, scene.location)
         scene.prompt_dependency = dependency(state, scene)
         state.scenes.append(scene); state.scenes.sort(key=lambda s:s.start)
         for i,s in enumerate(state.scenes,1): s.sequence=i
@@ -604,6 +689,7 @@ def regenerate_prompt(session, state, scene, provider):
     scene_data['text'] = prose
     result = Staging.model_validate(provider._request(ART_DIRECTION,
         json.dumps({'prose': prose, 'scene': scene_data, 'style': state.style,
+            'world_prompt': state.world_prompt,
             'catalog': [c.model_dump() for c in state.catalogs if c.identifier in scene.identity_links],
             'aspect_ratio': f'{state.image_settings.width}:{state.image_settings.height}'}), Staging))
     scene.final_prompt = result.final_prompt; scene.negative_prompt = result.negative_prompt
@@ -694,6 +780,8 @@ def generate_still(session, state, scene, provider, cancel=None, progress=lambda
     if refs and (not caps.references or len(refs) > caps.max_references):
         raise ValueError(f'{provider.name} supports {caps.max_references} references; selected {len(refs)}. Change reference selection or disable references.')
     prompt, negative = scene.final_prompt, scene.negative_prompt
+    if state.world_prompt and state.world_prompt not in prompt:
+        prompt += '\nWorld: ' + state.world_prompt
     if negative and not caps.negative_prompt:
         prompt += '\nAvoid: ' + negative; negative = ''
         progress('Provider adaptation: negative prompt appended as Avoid instructions')
