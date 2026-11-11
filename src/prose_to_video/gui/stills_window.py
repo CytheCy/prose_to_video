@@ -13,7 +13,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QTabWidget, Q
 from prose_to_video.pipeline.stills_workflow import (Workflow, Identity, Interval, load_workflow,
     analyze, dependency, regenerate_prompt, generate_still, store_still, assemble_timeline,
     validate_timeline, render_plan, listed_identities, generate_character_reference)
-from prose_to_video.storage.project_files import create_project, open_project, import_prose, import_audio
+from prose_to_video.storage.project_files import (create_project, open_project, import_prose, import_audio,
+    import_world_building_files, world_building_files)
 from prose_to_video.utils.prose import read_prose
 from prose_to_video.models.scene import Scene, source_hash
 from prose_to_video.gui.prose_viewer import ProseViewer
@@ -55,18 +56,30 @@ class MainWindow(QMainWindow):
         self.workspace_tabs = QTabWidget(); self.setCentralWidget(self.workspace_tabs)
         self.start = self.page('Start'); self.place = self.page('Place'); self.character = self.page('Character')
         self.scenes_page = self.page('Scenes'); self.stills_page = self.page('Stills'); self.video = self.page('Video Production')
-        self.status = QLabel('Create or open a project to begin'); self.status.setWordWrap(True)
-        self.footer_status = QLabel()
+        self.footer_status = QLabel('Create or open a project to begin')
+        self.status = self.footer_status
         self.footer_status.setWordWrap(True)
         self.footer_status.setTextFormat(Qt.PlainText)
         self.footer_status.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         self.statusBar().addWidget(self.footer_status, 1)
-        self.start.layout().addWidget(self.status)
-        self.buttons(self.start, [('New Project', self.new_project), ('Open Project', self.open_project),
-            ('Import Prose', lambda:self.import_source('prose')), ('Link / Replace Narration Audio', lambda:self.import_source('audio')),
-            ('Settings', lambda:self.settings())])
-        self.buttons(self.start, [('Analyze Story', self.analyze), ('Cancel Work', self.cancel)])
-        self.source_view = ProseViewer(); self.start.layout().addWidget(self.source_view)
+        start_split = QSplitter(Qt.Horizontal)
+        start_split.setChildrenCollapsible(False)
+        self.start.layout().addWidget(start_split)
+        start_controls = QWidget()
+        QVBoxLayout(start_controls)
+        self.buttons(start_controls, [('Import Prose', lambda:self.import_source('prose')),
+            ('Link / Replace Narration Audio', lambda:self.import_source('audio')),
+            ('Analyze Story', self.analyze),
+            ('Stop Analyzing', self.cancel)], vertical=True)
+        self.buttons(start_controls, [('Add World Building Files', self.add_world_building_files)], vertical=True)
+        self.world_building_list = QListWidget()
+        self.world_building_list.setMaximumHeight(110)
+        start_controls.layout().addWidget(self.world_building_list)
+        start_controls.layout().addStretch()
+        start_split.addWidget(start_controls)
+        self.source_view = ProseViewer(); start_split.addWidget(self.source_view)
+        start_split.setStretchFactor(0, 0)
+        start_split.setStretchFactor(1, 1)
         self.catalog_lists = {}; self.catalog_edits = {}
         self.character_reference_index = 0
         self._character_reference_id = None
@@ -165,12 +178,17 @@ class MainWindow(QMainWindow):
         self.preview_timer = QTimer(self); self.preview_timer.timeout.connect(self.preview_timeline); self.preview_timer.start(100)
         self._preview_asset = None
         self.video_message = QLabel(); self.video_message.setWordWrap(True); self.video.layout().addWidget(self.video_message)
-        edit_menu = self.menuBar().addMenu('Edit')
+        file_menu = self.menuBar().addMenu('File')
+        new_project_action = file_menu.addAction('New Project', self.new_project)
+        new_project_action.setShortcuts(QKeySequence.keyBindings(QKeySequence.New))
+        open_project_action = file_menu.addAction('Open Project', self.open_project)
+        open_project_action.setShortcuts(QKeySequence.keyBindings(QKeySequence.Open))
+        file_menu.addSeparator()
         self.undo_action = QAction('Undo', self)
         self.undo_action.setShortcuts(QKeySequence.keyBindings(QKeySequence.Undo))
         self.undo_action.setEnabled(False)
         self.undo_action.triggered.connect(self.undo)
-        edit_menu.addAction(self.undo_action)
+        file_menu.addAction(self.undo_action)
         # Text editors normally consume Undo before window shortcuts see it.
         QApplication.instance().installEventFilter(self)
         self.menuBar().addAction('Settings', lambda:self.settings())
@@ -196,8 +214,8 @@ class MainWindow(QMainWindow):
     def page(self,name):
         page=QWidget(); QVBoxLayout(page); self.workspace_tabs.addTab(page,name); return page
 
-    def buttons(self,page,items):
-        row=QHBoxLayout(); page.layout().addLayout(row)
+    def buttons(self,page,items,vertical=False):
+        row=QVBoxLayout() if vertical else QHBoxLayout(); page.layout().addLayout(row)
         buttons = []
         for label,callback in items:
             button=QPushButton(label); button.clicked.connect(callback); row.addWidget(button)
@@ -325,7 +343,7 @@ class MainWindow(QMainWindow):
         self.timeline_mode.setEnabled(False)
 
     def message(self,msg):
-        self.status.setText(msg); self.video_message.setText(msg); self.footer_status.setText(msg)
+        self.video_message.setText(msg); self.footer_status.setText(msg)
         self.footer_status.setToolTip(msg)
 
     @Slot(object)
@@ -386,6 +404,10 @@ class MainWindow(QMainWindow):
     def refresh(self):
         if self.session and self._timeline_dirty:
             self.commit_timeline_edits()
+        self.world_building_list.clear()
+        if self.session:
+            for path in world_building_files(self.session):
+                self.world_building_list.addItem(path.name)
         scene_id=self.scene().identifier if self.scene() else None
         path=self.session.project.resolved_prose(self.session.root) if self.session else None
         if path:
@@ -470,6 +492,21 @@ class MainWindow(QMainWindow):
                 return (import_prose if kind=='prose' else import_audio)(session,Path(path))
             self.run(job, lambda session:self.source_imported(session, kind),
                 description=f'Import {kind}: {Path(path).name}')
+        self.guarded(work)
+
+    def add_world_building_files(self):
+        def work():
+            self.require()
+            if len(world_building_files(self.session)) >= 3:
+                raise ValueError('A project can have up to three world building files')
+            paths, _ = QFileDialog.getOpenFileNames(self, 'Add World Building Files')
+            if not paths:
+                return
+            files = import_world_building_files(self.session, [Path(path) for path in paths])
+            self.world_building_list.clear()
+            for path in files:
+                self.world_building_list.addItem(path.name)
+            self.message(f'{len(files)} world building file(s) in project')
         self.guarded(work)
 
     @Slot(object)

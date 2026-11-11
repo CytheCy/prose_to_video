@@ -178,3 +178,45 @@ def import_prose(session: ProjectSession, source: Path) -> ProjectSession:
 
 def import_audio(session: ProjectSession, source: Path) -> ProjectSession:
     return _import_file(session, source, "audio")
+
+
+def world_building_files(session: ProjectSession) -> list[Path]:
+    directory = session.root / "world_building"
+    if not directory.exists():
+        return []
+    if not directory.is_dir() or not directory.resolve().is_relative_to(session.root.resolve()):
+        raise ProjectError("Project world building directory is invalid")
+    return sorted(path for path in directory.iterdir() if path.is_file() and not path.name.startswith("."))
+
+
+def import_world_building_files(session: ProjectSession, sources: list[Path]) -> list[Path]:
+    existing = world_building_files(session)
+    if len(existing) + len(sources) > 3:
+        raise ProjectError("A project can have up to three world building files")
+    names = [source.name for source in sources]
+    if len(names) != len(set(names)) or any(name in {path.name for path in existing} for name in names):
+        raise ProjectError("A world building file with that name is already in the project")
+    if any(not source.is_file() for source in sources):
+        raise ProjectError("A selected world building file does not exist or cannot be read")
+    directory = session.root / "world_building"
+    directory.mkdir(exist_ok=True)
+    copied = []
+    try:
+        for source in sources:
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(prefix=".import-", dir=directory, delete=False) as output:
+                    temporary = Path(output.name)
+                    with source.open("rb") as input_file:
+                        shutil.copyfileobj(input_file, output)
+                destination = directory / source.name
+                os.link(temporary, destination)
+                copied.append(destination)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+    except (OSError, ValueError) as exc:
+        for destination in copied:
+            destination.unlink(missing_ok=True)
+        raise ProjectError(f"Could not add world building files: {exc}") from exc
+    return world_building_files(session)
