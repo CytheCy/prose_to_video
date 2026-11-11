@@ -32,6 +32,11 @@ def frame_boundary(seconds: float, fps: int) -> int:
 def resolve_camera(label: str, settings: RenderSettings, image_size: tuple[int, int] | None,
                    report: ValidationReport, scene_id: str, shot_id: str,
                    approved: dict[str, float] | None = None) -> CameraFrame:
+    if not approved:
+        from prose_to_video.models.camera_movement import CAMERA_MOVEMENT_IDS
+        from prose_to_video.pipeline.still_camera import still_camera
+        if label in CAMERA_MOVEMENT_IDS:
+            return still_camera(label, settings, seed=shot_id)
     if approved:
         if image_size:
             iw, ih = image_size

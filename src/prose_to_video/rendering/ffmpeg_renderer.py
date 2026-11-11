@@ -17,7 +17,7 @@ from threading import Event
 from prose_to_video.models.video_render import RenderPlan, PlannedSegment
 from prose_to_video.pipeline.video_assembly import file_hash, validate_render_plan
 
-RENDERER_VERSION = 2
+RENDERER_VERSION = 3
 
 
 class RenderCanceled(Exception):
@@ -163,20 +163,29 @@ def _color(value: str) -> str:
 
 def image_filter(segment: PlannedSegment, background: str) -> str:
     w, h, n, fps = segment.width, segment.height, segment.frames, segment.frame_rate
-    if segment.fit_policy == 'fit':
+    moving = segment.camera.kind != 'Static' and n >= 2
+    if segment.fit_policy == 'fit' and not moving:
         base = f'scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color={_color(background)}'
     else:
         base = f'scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}'
+        if ((segment.camera.kind.startswith('zoom_in_') and '_pan_' not in segment.camera.kind)
+                or segment.camera.kind == 'zoom_out_from_focal_point'):
+            # Anchor the aspect-ratio crop too, so focal coordinates refer to the original still.
+            base += (f":x='(in_w-out_w)*{segment.camera.start_x:.8f}'"
+                     f":y='(in_h-out_h)*{segment.camera.start_y:.8f}'")
     camera = segment.camera
     if camera.kind == 'Static' or n < 2:
         return base + f',fps={fps},format=yuv420p'
     # Motion is bounded by the resolved framing, with no pixels outside the image.
     t = f'on/{n-1}'
-    zoom = f'{camera.start_zoom:.8f}+({camera.end_zoom-camera.start_zoom:.8f})*{t}'
+    zoom = (f'1+({camera.end_zoom-1:.8f})*(1-cos(2*PI*{t}))/2'
+            if camera.kind == 'breathe' else
+            f'{camera.start_zoom:.8f}+({camera.end_zoom-camera.start_zoom:.8f})*{t}')
+    zoom = f'max(1,({zoom}))'
     xpos = f'{camera.start_x:.8f}+({camera.end_x-camera.start_x:.8f})*{t}'
     ypos = f'{camera.start_y:.8f}+({camera.end_y-camera.start_y:.8f})*{t}'
-    return (base + f",zoompan=z='{zoom}':x='(iw-iw/zoom)*({xpos})':"
-            f"y='(ih-ih/zoom)*({ypos})':d={n}:s={w}x{h}:fps={fps},format=yuv420p")
+    return (base + f",zoompan=z='{zoom}':x='(iw-iw/zoom)*max(0,min(1,({xpos})))':"
+            f"y='(ih-ih/zoom)*max(0,min(1,({ypos})))':d={n}:s={w}x{h}:fps={fps},format=yuv420p")
 
 
 class FFmpegRenderer:

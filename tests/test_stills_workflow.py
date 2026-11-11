@@ -498,10 +498,14 @@ def test_direct_workflow_exports_real_video(tmp_path):
     run.audio_duration=1;run.words[0].audio_start=.1;run.words[0].audio_end=.3;run.words[1].audio_start=.6;run.words[1].audio_end=.9
     state.stills=[];state.selected={}
     image=QImage(64,64,QImage.Format_RGB32);image.fill(0xff123456);path=tmp_path/'still.png';image.save(str(path))
-    for scene in state.scenes:store_still(session,state,scene,path.read_bytes())
+    for scene, movement in zip(state.scenes, ['zoom_in', 'pan_left']):
+        scene.camera_movement = movement
+        store_still(session,state,scene,path.read_bytes())
     build_timeline(state,run,run.audio_hash)
     state.render_settings=state.render_settings.model_copy(update={'width':64,'height':64,'frame_rate':10,'preset':'ultrafast'})
     plan=render_plan(session,state);out=session.root/'output'/'test.mp4'
+    assert [s.camera.kind for s in plan.segments] == ['zoom_in', 'pan_left']
+    assert all(s.production_mode == 'Camera Motion' and s.fit_policy == 'crop' for s in plan.segments)
     FFmpegRenderer(session.root).render(plan,out)
     info=probe(out)
     assert any(s['codec_type']=='audio' for s in info['streams'])
@@ -705,3 +709,18 @@ def test_prompt_regeneration_omits_attached_headings(tmp_path):
     assert content['prose'] == 'Mira waits.'
     assert content['scene']['text'] == 'Mira waits.'
     assert scene.text == text
+
+
+def test_analysis_saves_camera_movement(tmp_path):
+    class CameraAI(FakeAI):
+        def _request(self, instructions, content, schema):
+            result = super()._request(instructions, content, schema)
+            if schema is Staging:
+                assert 'Choose camera_movement' in instructions
+                result.camera_movement = 'zoom_out_pan_right'
+            return result
+    session = session_with_text(tmp_path, 'Mira waits.')
+    state = Workflow()
+    analyze(session, state, CameraAI(), AISettings())
+    assert state.scenes[0].camera_movement == 'zoom_out_pan_right'
+    assert load_workflow(session).scenes[0].camera_movement == 'zoom_out_pan_right'

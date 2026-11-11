@@ -33,7 +33,8 @@ class ViewpointContext(BaseModel):
         return self
 
 SHOT_TYPES = ("Establishing", "Extreme wide", "Wide", "Medium", "Close-up", "Extreme close-up", "Over-the-shoulder", "Point-of-view", "Insert", "Environmental detail")
-CAMERA_MOVEMENTS = ("Static", "Slow pan left", "Slow pan right", "Pan up", "Pan down", "Tilt up", "Tilt down", "Push in", "Pull back", "Diagonal pan", "Combined pan and zoom", "Custom", "Tracking", "Slow lateral", "Aerial")
+from prose_to_video.models.camera_movement import CAMERA_MOVEMENT_IDS
+CAMERA_MOVEMENTS = CAMERA_MOVEMENT_IDS + ("Static", "Slow pan left", "Slow pan right", "Pan up", "Pan down", "Tilt up", "Tilt down", "Push in", "Pull back", "Diagonal pan", "Combined pan and zoom", "Custom", "Tracking", "Slow lateral", "Aerial")
 STATUSES = ("Not reviewed", "Reviewed", "Manually edited")
 TIMING_STATUSES = ("fully timed", "partially timed", "untimed")
 

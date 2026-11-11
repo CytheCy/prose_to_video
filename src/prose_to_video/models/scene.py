@@ -9,6 +9,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+from prose_to_video.models.camera_movement import CameraMovement
+
+
 class Scene(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -45,6 +48,9 @@ class Scene(BaseModel):
     camera_framing: str = ""
     camera_angle: str = ""
     camera_position: str = ""
+    camera_movement: CameraMovement = "static_hold"
+    camera_focal_x: float = Field(default=.5, ge=0, le=1)
+    camera_focal_y: float = Field(default=.5, ge=0, le=1)
     lighting: str = ""
     palette_materials: str = ""
     final_prompt: str = ""

@@ -14,10 +14,12 @@ from pathlib import Path
 from threading import Event
 from uuid import uuid4
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from prose_to_video.models.scene import Scene, source_hash, validate_partition
+from prose_to_video.models.camera_movement import CameraMovement, CAMERA_RENDER_FIELDS
+from prose_to_video.pipeline.still_camera import still_camera
 from prose_to_video.models.image_job import ImageRequest, ImageReference
-from prose_to_video.models.video_render import RenderPlan, RenderSettings, PlannedSegment, CameraFrame
+from prose_to_video.models.video_render import RenderPlan, RenderSettings, PlannedSegment
 from prose_to_video.pipeline.audio_transcription import source_file_hash
 from prose_to_video.pipeline.character_detection import PRONOUNS
 from prose_to_video.pipeline.scene_detection import _scene_prose
@@ -157,7 +159,11 @@ def load_workflow(session):
             data.update(identifier=shot.identifier, sequence=len(state.scenes)+1, start=shot.source_start,
                 end=shot.source_end, text=shot.original_prose, title=shot.title, visual_description=shot.visual_description,
                 foreground=shot.foreground, background=shot.background, camera_framing=shot.camera_framing,
-                camera_angle=shot.camera_angle, camera_position=shot.camera_position, lighting=shot.lighting,
+                camera_angle=shot.camera_angle, camera_position=shot.camera_position, camera_movement={
+                    "Static": "static_hold", "Push in": "zoom_in", "Pull back": "zoom_out",
+                    "Slow pan left": "pan_left", "Slow pan right": "pan_right",
+                    "Tilt up": "pan_up", "Tilt down": "pan_down"}.get(shot.camera_movement,
+                        shot.camera_movement if shot.camera_movement in CameraMovement.__args__ else "static_hold"), lighting=shot.lighting,
                 source_version=state.prose_hash, identity_links=shot.entity_refs, characters=shot.characters,
                 environment=shot.environment, important_objects=shot.objects, visual_atmosphere=shot.atmosphere)
             prompt_store = PromptStore(session.root)
@@ -327,10 +333,16 @@ class Staging(Record):
     camera_framing: str
     camera_angle: str
     camera_position: str
+    camera_movement: CameraMovement = "zoom_in"
     lighting: str
     palette_materials: str
     final_prompt: str = Field(min_length=1)
     negative_prompt: str
+
+    @field_validator("camera_movement", mode="before")
+    @classmethod
+    def default_movement(cls, value):
+        return value or "zoom_in"
 
 
 ART_DIRECTION = '''Act as an expert storyboard artist, cinematographer and production designer.
@@ -347,6 +359,9 @@ When a shared world prompt is supplied, carry its visual era, materials and mood
 the final prompt and location, while keeping the scene's specific setting clear.
 Include the supplied project style and aspect ratio. No generic masterpiece adjective lists,
 unintended text, captions, watermarks, collages or contradictory staging.
+Choose camera_movement from the schema for animating the still over its scene duration.
+Favor restrained zooms, pans or static holds suited to composition and pacing; vary movements
+where appropriate. This is a video instruction; do not include movement in the still image prompt.
 Do not put administrative fields such as boundary_reason in the prompt.
 Return every structured field; use empty strings/lists where irrelevant.'''
 
@@ -410,7 +425,7 @@ def paragraph_spans(text):
 
 
 def dependency(state, scene):
-    data = scene.model_dump(exclude={'final_prompt', 'negative_prompt', 'prompt_dependency', 'manual_fields'})
+    data = scene.model_dump(exclude={'final_prompt', 'negative_prompt', 'prompt_dependency', 'manual_fields'} | CAMERA_RENDER_FIELDS)
     return source_hash(json.dumps([data, state.style, state.image_settings.width, state.image_settings.height,
         state.world_prompt, [c.model_dump() for c in state.catalogs if c.identifier in scene.identity_links]], sort_keys=True))
 
@@ -996,11 +1011,13 @@ def render_plan(session, state):
         if not path.is_file(): raise ValueError(f'Missing image {asset.path}')
         a,b = round(t.start*settings.frame_rate), round(t.end*settings.frame_rate)
         if b<=a: raise ValueError('An image interval is shorter than one frame')
+        scene = next(s for s in state.scenes if s.identifier == t.scene_id)
+        camera = still_camera(scene.camera_movement, settings, scene.camera_focal_x, scene.camera_focal_y, scene.identifier)
         segments.append(PlannedSegment(scene_id=t.scene_id, shot_id=t.scene_id, asset_id=asset.identifier,
-            source_path=str(path), source_fingerprint=source_file_hash(path), production_mode='Static Image',
+            source_path=str(path), source_fingerprint=source_file_hash(path), production_mode='Static Image' if camera.kind == 'Static' else 'Camera Motion',
             source_start=t.start, source_end=t.end, start_frame=a, end_frame=b, width=settings.width,
-            height=settings.height, frame_rate=settings.frame_rate, fit_policy=settings.fit_policy,
-            camera=CameraFrame(), transition=settings.default_transition,
+            height=settings.height, frame_rate=settings.frame_rate, fit_policy='crop' if camera.kind != 'Static' else settings.fit_policy,
+            camera=camera, transition=settings.default_transition,
             transition_frames=round(settings.crossfade_duration*settings.frame_rate) if settings.default_transition!='Cut' else 0))
     return RenderPlan(project_id=session.project.identifier, scope='full', mode='final', source_start=0,
         source_end=duration, audio_path=str(audio), audio_fingerprint=digest, audio_duration=duration,

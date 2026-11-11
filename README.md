@@ -47,7 +47,7 @@ The GUI smoke test uses Qt's `offscreen` platform, so it does not require a visi
 
 2. **Analyze Story** first reads the whole story in bounded requests to establish
    character/place identities, then plans visual beats using validated sentence IDs,
-   and writes staging and a self-contained TTI prompt for each scene. It does not
+   and writes staging, a camera movement, and a self-contained TTI prompt for each scene. It does not
    generate images. Cancel safely; Analyze Story resumes saved checkpoints.
    After prose changes, Analyze Story clears the previous analysis, scenes, prompts,
    still selections and timeline, then rebuilds through image prompts. Reference
@@ -82,6 +82,17 @@ The GUI smoke test uses Qt's `offscreen` platform, so it does not require a visi
    covers trailing audio. Speech spans and display intervals are separate fields.
    Use the audio player's seek/play controls to preview the selected stills against
    narration. Export MP4 through FFmpeg; Preview Export opens a rendered video.
+
+**Camera Movement** appears after Camera Position in Scenes. In Video Production,
+each included scene shows its selected still on the left and a movement dropdown on
+the right. Changes save automatically, support Undo, and do not require regenerating
+the image. Choose from zooms, directional and diagonal pans, combined pans and zooms,
+anchored zooms, slow drift, breathing, or a static hold. Focal-point movements expose
+X/Y coordinates from 0 to 1, measured from the original image's top-left corner.
+Moving shots fill and crop to the video aspect ratio with bounded viewports so no
+image edge exposes a gap. Static holds retain the configured image fit policy.
+Existing scenes default to static holds. The audio timeline previews still selection;
+use Preview Export to watch rendered camera motion.
 
 The timeline table edits display start/end times in seconds. Adjust both sides of a shared boundary,
 then Save Timeline Edits. Manual intervals survive rebuilds; conflicting rebuilds fail
