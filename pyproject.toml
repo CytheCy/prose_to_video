@@ -13,6 +13,7 @@ dependencies = [
   "pydantic>=2.9,<3",
   "openai>=3,<4",
   "pypdf>=5,<7",
+  "faster-whisper>=1.2.1,<2",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +25,9 @@ prose-to-video = "prose_to_video.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+podcast_splitter = ["LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -416,7 +416,7 @@ def test_empty_project_migration_is_idempotent(tmp_path):
     assert session.database.load_scenes()==(None,[])
 
 
-def test_six_tab_navigation(monkeypatch, tmp_path):
+def test_seven_tab_navigation(monkeypatch, tmp_path):
     # Qt multimedia owns process-global resources. Exercise an independent app
     # lifetime so historical widget tests cannot retain its player at teardown.
     import subprocess
@@ -429,7 +429,7 @@ from PySide6.QtCore import QCoreApplication, QEvent
 from prose_to_video.gui.main_window import MainWindow
 app = QApplication([])
 window = MainWindow()
-assert [window.workspace_tabs.tabText(i) for i in range(6)] == ['Start','Place','Character','Scenes','Stills','Video Production']
+assert [window.workspace_tabs.tabText(i) for i in range(7)] == ['Podcast Splitter','Start','Place','Character','Scenes','Stills','Video Production']
 from tempfile import TemporaryDirectory
 from pathlib import Path
 from PySide6.QtCore import QEventLoop, QTimer

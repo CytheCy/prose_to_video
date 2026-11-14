@@ -1,4 +1,4 @@
-"""Six-tab workspace for the direct stills workflow. No legacy workers are started."""
+"""Shared chapter-audio and direct stills workspace."""
 from pathlib import Path
 from threading import Event
 from time import monotonic
@@ -15,11 +15,13 @@ from prose_to_video.pipeline.stills_workflow import (Workflow, Identity, Interva
     validate_timeline, render_plan, listed_identities, generate_character_reference, set_world_prompt,
     WORLD_PROMPT_LIMIT)
 from prose_to_video.storage.project_files import (create_project, open_project, import_prose, import_audio,
-    import_world_building_files, remove_world_building_file, world_building_files)
+    import_world_building_files, remove_world_building_file, world_building_files,
+    save_project as save_project_files)
 from prose_to_video.utils.prose import read_prose
 from prose_to_video.models.scene import Scene, source_hash
 from prose_to_video.models.camera_movement import CAMERA_MOVEMENT_IDS, CAMERA_RENDER_FIELDS
 from prose_to_video.gui.prose_viewer import ProseViewer
+from prose_to_video.gui.podcast_panel import PodcastPanel
 from prose_to_video.gui.audio_player import AudioPlayer
 from prose_to_video.gui.video_preview import VideoPreview
 from prose_to_video.pipeline.still_camera import still_camera
@@ -76,6 +78,8 @@ class MainWindow(QMainWindow):
         self._undo_time = 0
         self._worker_snapshot = None
         self.workspace_tabs = QTabWidget(); self.setCentralWidget(self.workspace_tabs)
+        self.podcast = PodcastPanel(self)
+        self.workspace_tabs.addTab(self.podcast, 'Podcast Splitter')
         self.start = self.page('Start'); self.place = self.page('Place'); self.character = self.page('Character')
         self.scenes_page = self.page('Scenes'); self.stills_page = self.page('Stills'); self.video = self.page('Video Production')
         self.footer_status = QLabel('Create or open a project to begin')
@@ -217,6 +221,8 @@ class MainWindow(QMainWindow):
         new_project_action.setShortcuts(QKeySequence.keyBindings(QKeySequence.New))
         open_project_action = file_menu.addAction('Open Project', self.open_project)
         open_project_action.setShortcuts(QKeySequence.keyBindings(QKeySequence.Open))
+        save_action = file_menu.addAction('Save Project', self.save_project)
+        save_action.setShortcuts(QKeySequence.keyBindings(QKeySequence.Save))
         file_menu.addSeparator()
         self.undo_action = QAction('Undo', self)
         self.undo_action.setShortcuts(QKeySequence.keyBindings(QKeySequence.Undo))
@@ -288,6 +294,8 @@ class MainWindow(QMainWindow):
                                         (self._undo_history or self._timeline_dirty)))
 
     def eventFilter(self, watched, event):
+        if isinstance(watched, QWidget) and self.podcast.isAncestorOf(watched):
+            return super().eventFilter(watched, event)
         if isinstance(watched, QWidget) and watched.window() is self:
             # An open table cell has its own uncommitted text buffer.
             if isinstance(watched, QLineEdit) and self.timeline.isAncestorOf(watched):
@@ -408,7 +416,7 @@ class MainWindow(QMainWindow):
 
     def new_project(self):
         def work():
-            if self.worker: return
+            if self.worker or self.podcast.process: return
             parent=QFileDialog.getExistingDirectory(self,'Project parent folder')
             if not parent:return
             name,ok=QInputDialog.getText(self,'New Project','Project name')
@@ -417,7 +425,7 @@ class MainWindow(QMainWindow):
 
     def open_project(self):
         def work():
-            if self.worker:return
+            if self.worker or self.podcast.process:return
             path=QFileDialog.getExistingDirectory(self,'Open project folder')
             if path:self.load(open_project(Path(path)))
         self.guarded(work)
@@ -428,6 +436,7 @@ class MainWindow(QMainWindow):
         self._undo_history.clear()
         self._undo_group = None
         self._scene_drafts.clear()
+        self.podcast.bind(session)
         self.session=session; self.state=state; self.refresh()
         self.update_undo_action()
         self.message(session.project.name + (' · '+ '; '.join(self.state.migration_notes) if self.state.migration_notes else ''))
@@ -625,7 +634,10 @@ class MainWindow(QMainWindow):
 
     def import_source(self,kind):
         def work():
-            self.require(); path,_=QFileDialog.getOpenFileName(self,'Import '+kind)
+            self.require()
+            if self.podcast.process:
+                raise ValueError('Cancel the audio task before replacing sources')
+            path,_=QFileDialog.getOpenFileName(self,'Import '+kind)
             if not path:return
             session=self.session
             def job(cancel,progress):
@@ -674,6 +686,7 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def source_imported(self,session,kind='prose'):
         self.session=session
+        self.podcast.sync_sources(session, kind)
         if kind == 'audio':
             # Qt otherwise keeps the old source open when the path is unchanged.
             self.audio.set_audio(None)
@@ -861,7 +874,18 @@ class MainWindow(QMainWindow):
         else:
             self._unsaved_edits = False
 
+    def save_project(self):
+        def work():
+            self.require()
+            self.state.save(self.session.root)
+            self.podcast.save_shared(force=True)
+            self.session = save_project_files(self.session)
+            self.podcast.session = self.session
+            self.message("Project saved")
+        self.guarded(work)
+
     def flush_edits(self):
+        self.podcast.save_shared()
         if self.session and self._timeline_dirty:
             self.commit_timeline_edits()
         if self._scene_drafts:
@@ -1149,11 +1173,15 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self,event):
         if self.worker:self.cancel(); event.ignore(); return
+        if self.podcast.process:
+            self.message("Cancel the running audio task before closing")
+            event.ignore(); return
         try:
             self.flush_edits()
         except (ValueError, OSError) as exc:
             QMessageBox.warning(self, 'Could not save changes', str(exc))
             event.ignore()
             return
+        self.podcast.shutdown()
         self.audio.set_audio(None)
         event.accept()

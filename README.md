@@ -1,8 +1,8 @@
 # Prose to Video
 
-Desktop prose-to-stills-to-video editor. The active application has six tabs:
-**Start → Place → Character → Scenes → Stills → Video Production**.
-Settings are available from Start and the menu. Historical storyboard, generic entity,
+Desktop prose-to-stills-to-video editor. The active application has seven tabs:
+**Podcast Splitter → Start → Place → Character → Scenes → Stills → Video Production**.
+Project and settings commands are available from the application menu. Historical storyboard, generic entity,
 animation, production queue, QC and approval interfaces are inactive.
 
 ## Fedora KDE setup
@@ -24,7 +24,7 @@ python -m pip install -e .
 prose-to-video
 ```
 
-The application uses `PySide6-Addons`, Pydantic, and the official OpenAI Python client. `pytest` is the only test dependency. Audio metadata uses FFprobe.
+The application uses `PySide6-Addons`, Pydantic, and the official OpenAI Python client. `pytest` is the only test dependency. Audio metadata uses FFprobe. The integrated Podcast Splitter uses faster-whisper for local CPU speech recognition and FFmpeg for previews and chapter exports (MP3 requires libmp3lame).
 
 To run the tests:
 
@@ -35,6 +35,29 @@ python -m pytest -q
 ```
 
 The GUI smoke test uses Qt's `offscreen` platform, so it does not require a visible desktop session. For interactive use, launch `prose-to-video` from a Fedora KDE session. `python -m prose_to_video.main` is an equivalent launch command.
+
+## Podcast Splitter (first tab)
+
+Create or open a project with **File → New Project / Open Project**, then choose
+Markdown prose and narration in **Podcast Splitter**. Both tabs use the same copies
+in the project's `source/` folder; importing or replacing a source in either tab
+updates the other. Splitter Markdown supports `.md`, `.markdown`, and `.txt` with
+ATX headings; prose without headings remains usable by the video workflow.
+
+The original splitter interface and engine are included in `src/podcast_splitter/`
+under their MIT license. Select headings, choose a local speech model, analyze,
+preview and edit IN/OUT cuts, approve flagged chapters, widen all parts, and export
+MP3, FLAC, or WAV with matching Markdown files. Existing exports are never
+overwritten. The default export folder is `output/chapters/` inside the project;
+you can still choose another destination. First analysis downloads the selected
+speech model; models and transcript caches use the user's normal cache directory.
+
+**File → Save Project** saves both workflows. Splitter edits also save automatically
+while idle and when switching projects or closing the app. `podcast-splitter.json`
+stores chapter selections, cut points, approvals, waveform, widening, model, and
+export format alongside `project.sqlite` and `stills-workflow.json`. Source and
+in-project export paths are relative, so the entire project folder can be moved.
+Cancel a running audio task before saving, switching projects, or closing.
 
 ## Workflow
 
