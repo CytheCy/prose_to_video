@@ -63,6 +63,11 @@ The GUI smoke test uses Qt's `offscreen` platform, so it does not require a visi
    scene to highlight its exact passage. List fields use one entry per line. Manual
    edits save automatically; prompt regeneration is explicit. Select prose to split at its start,
    or merge with the next scene. Existing images remain available after restructuring.
+   Technical explanation can use a concept map (systems/flows), blueprint (sections/construction),
+   CAD visualization (geometry), or product showcase (device appearance). Action involving technology
+   can remain cinematic. **Explanatory focus** records the source-supported idea the image should
+   communicate. Edit it and **Render type**, then use **Regenerate Prompt** to apply them; regeneration
+   preserves these choices and the project's artistic style without inventing technical specifications.
    Press **Ctrl+Z** (or choose **Edit → Undo**) to undo edits and project actions;
    the restored state saves automatically. Undo history lasts until the project is closed
    or source files are imported. Consecutive typing is grouped into one undo step.

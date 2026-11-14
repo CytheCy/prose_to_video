@@ -16,6 +16,7 @@ from uuid import uuid4
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from prose_to_video.models.scene import Scene, source_hash, validate_partition
+from prose_to_video.models.visual_treatment import TECHNICAL_PLANNING, TECHNICAL_TREATMENTS
 from prose_to_video.models.camera_movement import CameraMovement, CAMERA_RENDER_FIELDS
 from prose_to_video.pipeline.still_camera import still_camera
 from prose_to_video.models.image_job import ImageRequest, ImageReference
@@ -320,6 +321,7 @@ class Staging(Record):
     viewpoint_category: str
     visual_description: str
     render_type: Literal['cinematic', 'concept_map', 'blueprint', 'cad_visualization', 'product_showcase']
+    explanatory_focus: str = ''
     environment: str
     important_objects: list[str]
     actions: list[str]
@@ -350,7 +352,15 @@ Depict one legible instant, never multiple sequential actions. Respect chronolog
 Use canonical identity descriptions, contextual clothing/age, positions, expressions, gestures,
 eyelines and object placement. Describe foreground, middle ground, background, composition,
 camera position/framing/angle, lighting direction, palette and materials when relevant.
-For technical exposition prefer a coherent concept map, blueprint, CAD or product view.
+Distinguish action involving technology from exposition explaining how it works, including
+invented sci-fi technology. Technology vocabulary alone never requires an explanatory view.
+Set explanatory_focus to one concise, source-supported idea the viewer should understand;
+leave it empty for narrative action. Choose render_type by that purpose, then write ALL
+staging, composition, camera fields and final_prompt to suit that treatment. For explanatory
+views, omit irrelevant character/environment layers rather than forcing a cinematic room scene.
+If a saved scene is supplied, its render_type and explanatory_focus are binding: regenerate
+the prompt to match them, even if you would otherwise choose a different treatment.
+Preserve the approved artistic medium and distinguish source facts from proposed design.
 Distinguish observer's physical location from remote screens, memories and other media;
 never put offstage people in frame. No invented plot facts. Restrained consistent design
 choices are allowed for unspecified appearance. Final prompt must be self-contained, repeat
@@ -364,6 +374,22 @@ Favor restrained zooms, pans or static holds suited to composition and pacing; v
 where appropriate. This is a video instruction; do not include movement in the still image prompt.
 Do not put administrative fields such as boundary_reason in the prompt.
 Return every structured field; use empty strings/lists where irrelevant.'''
+
+ART_DIRECTION += '\n' + TECHNICAL_PLANNING + '\nTreatment definitions:\n' + '\n'.join(
+    f'{name}: {instruction}' for name, instruction in TECHNICAL_TREATMENTS.items())
+
+
+def treatment_prompt(prompt, render_type, explanatory_focus):
+    """Carry technical composition constraints into the actual image request."""
+    instruction = TECHNICAL_TREATMENTS.get(render_type)
+    if not instruction:
+        return prompt
+    parts = [instruction] if instruction not in prompt else []
+    if explanatory_focus.strip():
+        focus = f'Visually communicate: {explanatory_focus.strip()}'
+        if focus not in prompt:
+            parts.append(focus)
+    return ' '.join([*parts, prompt])
 
 IDENTITY_LINKS = '''identity_links must contain only exact identifier values from the supplied catalog.
 Never use character/place names, aliases, pronouns, or newly invented IDs in identity_links.
@@ -632,6 +658,8 @@ Do not invent events or relationships. Use existing IDs for existing identities.
         if included:
             result = request(f'beats-{number}', 'Divide passages into meaningful visual beats, one still per beat. '
                 'Choose action, setting, viewpoint, reveal or composition changes, not one per sentence. '
+                'For mixed action and technical explanation, use a separate explanatory beat when one '
+                'image cannot clearly communicate both. Keep continuous action together otherwise. '
                 'Cover every supplied ID once, in order, with contiguous inclusive first_id/last_id. '
                 f'Image density: {state.density}. Low favors fewer images; High favors more.',
                 {'passages': [{'id': i, 'text': text[a:b]} for i,(a,b) in enumerate(block,1)]}, Beats, description)
@@ -681,6 +709,8 @@ Do not invent events or relationships. Use existing IDs for existing identities.
                     'instruction': 'Return the complete scene again using only catalog identifiers in identity_links. '
                         'Resolve identities against the catalog; do not invent IDs.'}
             data = result.model_dump()
+            data['final_prompt'] = treatment_prompt(
+                result.final_prompt, result.render_type, result.explanatory_focus)
         else: data = {'title': 'Excluded manuscript material'}
         scene = Scene(sequence=sequence, start=start, end=end, text=text[start:end],
             source_version=digest, production_included=included, **data)
@@ -707,7 +737,8 @@ def regenerate_prompt(session, state, scene, provider):
             'world_prompt': state.world_prompt,
             'catalog': [c.model_dump() for c in state.catalogs if c.identifier in scene.identity_links],
             'aspect_ratio': f'{state.image_settings.width}:{state.image_settings.height}'}), Staging))
-    scene.final_prompt = result.final_prompt; scene.negative_prompt = result.negative_prompt
+    scene.final_prompt = treatment_prompt(result.final_prompt, scene.render_type, scene.explanatory_focus)
+    scene.negative_prompt = result.negative_prompt
     scene.prompt_dependency = dependency(state, scene); state.save(session.root)
 
 

@@ -169,6 +169,10 @@ class MainWindow(QMainWindow):
             if name in excluded: continue
             edit = QPlainTextEdit(); edit.setMaximumHeight(100 if name=='final_prompt' else 65)
             if name in self.list_fields: edit.setToolTip('One item per line; identity links use catalog IDs')
+            if name == 'explanatory_focus':
+                edit.setToolTip('The source-supported idea this image explains. Leave empty for narrative action. Regenerate Prompt to apply changes.')
+            elif name == 'render_type':
+                edit.setToolTip('cinematic, concept_map, blueprint, cad_visualization, or product_showcase. Regenerate Prompt to apply changes.')
             self.fields[name] = edit; form.addRow(name.replace('_',' ').capitalize(), edit)
             edit.textChanged.connect(lambda n=name:self.scene_edited(n))
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(detail); split.addWidget(scroll)

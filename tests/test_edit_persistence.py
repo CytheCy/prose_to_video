@@ -33,6 +33,8 @@ window.refresh()
 window.scene_list.setCurrentRow(0)
 window.fields['final_prompt'].setPlainText('Manual image prompt')
 window.fields['characters'].setPlainText('Mira\nJon')
+window.fields['render_type'].setPlainText('concept_map')
+window.fields['explanatory_focus'].setPlainText('The relay connects nearby devices.')
 window.scene_list.setCurrentRow(1)
 window.fields['title'].setPlainText('Second edited scene')
 window.scene_list.setCurrentRow(0)
@@ -44,6 +46,8 @@ restored = load_workflow(session)
 assert restored.catalogs[0].description == 'New character description'
 assert restored.catalogs[1].description == 'New place description'
 assert restored.scenes[0].characters == ['Mira', 'Jon']
+assert restored.scenes[0].render_type == 'concept_map'
+assert restored.scenes[0].explanatory_focus == 'The relay connects nearby devices.'
 assert 'final_prompt' in restored.scenes[0].manual_fields
 assert restored.scenes[1].title == 'Second edited scene'
 

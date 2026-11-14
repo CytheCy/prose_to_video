@@ -756,6 +756,69 @@ def test_prompt_regeneration_omits_attached_headings(tmp_path):
     assert scene.text == text
 
 
+@pytest.mark.parametrize('treatment', [
+    'concept_map', 'blueprint', 'cad_visualization', 'product_showcase',
+])
+def test_technical_scene_focus_survives_analysis_and_prompt_regeneration(tmp_path, treatment):
+    from prose_to_video.models.visual_treatment import TECHNICAL_TREATMENTS
+    from prose_to_video.pipeline.stills_workflow import regenerate_prompt
+    focus = 'The needle relays its signal through nearby devices.'
+
+    class TechnicalAI(FakeAI):
+        def _request(self, instructions, content, schema):
+            result = super()._request(instructions, content, schema)
+            if schema is Staging:
+                assert 'Technology vocabulary alone never requires' in instructions
+                assert 'render_type and explanatory_focus are binding' in instructions
+                assert TECHNICAL_TREATMENTS[treatment] in instructions
+                if 'scene' not in self.calls[-1][1]:
+                    result.render_type = treatment
+                    result.explanatory_focus = focus
+                    result.final_prompt = 'An illustrated device explanation.'
+                else:
+                    # Provider suggestions must not replace the saved user selection.
+                    result.render_type = 'cinematic'
+                    result.explanatory_focus = 'A different idea'
+                    result.final_prompt = 'A revised illustrated device explanation.'
+            return result
+
+    session = session_with_text(tmp_path, 'The needle relays its signal through nearby devices.')
+    state = Workflow()
+    provider = TechnicalAI()
+    analyze(session, state, provider, AISettings())
+    scene = load_workflow(session).scenes[0]
+    assert scene.render_type == treatment
+    assert scene.explanatory_focus == focus
+    assert TECHNICAL_TREATMENTS[treatment] in scene.final_prompt
+    assert focus in scene.final_prompt
+    # Regeneration must respect an edited explanatory purpose, too.
+    scene.explanatory_focus = 'The source of the relayed signal remains concealed.'
+    state.scenes = [scene]
+    regenerate_prompt(session, state, scene, provider)
+    assert provider.calls[-1][1]['scene']['explanatory_focus'] == scene.explanatory_focus
+    restored = load_workflow(session).scenes[0]
+    assert restored.render_type == treatment
+    assert restored.explanatory_focus == scene.explanatory_focus
+    assert TECHNICAL_TREATMENTS[treatment] in restored.final_prompt
+    assert scene.explanatory_focus in restored.final_prompt
+    assert 'A revised illustrated device explanation.' in restored.final_prompt
+    assert restored.prompt_dependency == dependency(state, restored)
+    scene.explanatory_focus = 'A changed focus'
+    assert scene.prompt_dependency != dependency(state, scene)
+
+
+def test_narrative_action_keeps_cinematic_prompt_and_legacy_scene_loads(tmp_path):
+    session = session_with_text(tmp_path, 'Mira hides the wireless device inside her coat.')
+    state = Workflow()
+    analyze(session, state, FakeAI(), AISettings())
+    scene = state.scenes[0]
+    assert scene.render_type == 'cinematic'
+    assert scene.explanatory_focus == ''
+    assert scene.final_prompt.startswith('A woman with short black hair')
+    legacy = scene.model_dump(exclude={'explanatory_focus'})
+    assert Scene.model_validate(legacy).explanatory_focus == ''
+
+
 def test_analysis_saves_camera_movement(tmp_path):
     class CameraAI(FakeAI):
         def _request(self, instructions, content, schema):

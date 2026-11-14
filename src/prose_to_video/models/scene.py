@@ -32,6 +32,7 @@ class Scene(BaseModel):
     summary: str = ""
     visual_description: str = ""
     render_type: Literal["cinematic", "concept_map", "blueprint", "cad_visualization", "product_showcase"] = "cinematic"
+    explanatory_focus: str = ""
     environment: str = ""
     important_objects: list[str] = Field(default_factory=list)
     actions: list[str] = Field(default_factory=list)
