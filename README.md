@@ -1,7 +1,7 @@
 # Prose to Video
 
-Desktop prose-to-stills-to-video editor. The active application has seven tabs:
-**Podcast Splitter → Start → Place → Character → Scenes → Stills → Video Production**.
+Desktop prose-to-stills-to-video editor. The active application has eight tabs:
+**Start → Podcast Splitter → Analyze → Place → Character → Scenes → Stills → Video Production**.
 Project and settings commands are available from the application menu. Historical storyboard, generic entity,
 animation, production queue, QC and approval interfaces are inactive.
 
@@ -36,10 +36,12 @@ python -m pytest -q
 
 The GUI smoke test uses Qt's `offscreen` platform, so it does not require a visible desktop session. For interactive use, launch `prose-to-video` from a Fedora KDE session. `python -m prose_to_video.main` is an equivalent launch command.
 
-## Podcast Splitter (first tab)
+## Podcast Splitter
 
-Create or open a project with **File → New Project / Open Project**, then choose
-Markdown prose and narration in **Podcast Splitter**. Both tabs use the same copies
+On **Start**, click **Create Project**, choose the parent folder and project name,
+then click **Save** to create the project folder. Use **Import Prose** and
+**Import Podcast Audio** to copy source files into the project. Existing projects
+can be opened with **File → Open Project**. The splitter and video workflow use the same copies
 in the project's `source/` folder; importing or replacing a source in either tab
 updates the other. Splitter Markdown supports `.md`, `.markdown`, and `.txt` with
 ATX headings; prose without headings remains usable by the video workflow.
@@ -61,8 +63,8 @@ Cancel a running audio task before saving, switching projects, or closing.
 
 ## Workflow
 
-1. In **Start**, create/open a project, import UTF-8 prose, optionally link narration,
-   configure AI/image/export settings, and save a project visual style and image density.
+1. In **Start**, create a project and import prose and optional podcast audio.
+   In **Analyze**, configure AI/image/export settings and save a project visual style and image density.
    Imports preserve the original files. Re-import the active prose file after editing it to reload its changed text; other duplicate source filenames are rejected.
    To replace edited narration, use **Link / Replace Narration Audio** and select
    the edited file, including one with the same filename. Then rebuild the timeline

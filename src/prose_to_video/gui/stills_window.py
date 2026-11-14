@@ -14,7 +14,7 @@ from prose_to_video.pipeline.stills_workflow import (Workflow, Identity, Interva
     analyze, dependency, regenerate_prompt, generate_still, store_still, assemble_timeline,
     validate_timeline, render_plan, listed_identities, generate_character_reference, set_world_prompt,
     WORLD_PROMPT_LIMIT)
-from prose_to_video.storage.project_files import (create_project, open_project, import_prose, import_audio,
+from prose_to_video.storage.project_files import (open_project, import_prose, import_audio,
     import_world_building_files, remove_world_building_file, world_building_files,
     save_project as save_project_files)
 from prose_to_video.utils.prose import read_prose
@@ -22,6 +22,7 @@ from prose_to_video.models.scene import Scene, source_hash
 from prose_to_video.models.camera_movement import CAMERA_MOVEMENT_IDS, CAMERA_RENDER_FIELDS
 from prose_to_video.gui.prose_viewer import ProseViewer
 from prose_to_video.gui.podcast_panel import PodcastPanel
+from prose_to_video.gui.create_project_dialog import CreateProjectDialog
 from prose_to_video.gui.audio_player import AudioPlayer
 from prose_to_video.gui.video_preview import VideoPreview
 from prose_to_video.pipeline.still_camera import still_camera
@@ -78,10 +79,20 @@ class MainWindow(QMainWindow):
         self._undo_time = 0
         self._worker_snapshot = None
         self.workspace_tabs = QTabWidget(); self.setCentralWidget(self.workspace_tabs)
+        self.start_page = self.page('Start')
         self.podcast = PodcastPanel(self)
         self.workspace_tabs.addTab(self.podcast, 'Podcast Splitter')
-        self.start = self.page('Start'); self.place = self.page('Place'); self.character = self.page('Character')
+        self.start = self.page('Analyze'); self.place = self.page('Place'); self.character = self.page('Character')
         self.scenes_page = self.page('Scenes'); self.stills_page = self.page('Stills'); self.video = self.page('Video Production')
+        self.buttons(self.start_page, [('Create Project', self.new_project)], vertical=True)
+        self.start_import_buttons = self.buttons(self.start_page, [
+            ('Import Prose', lambda: self.import_source('prose')),
+            ('Import Podcast Audio', lambda: self.import_source('audio'))], vertical=True)
+        self.project_summary = QLabel()
+        self.project_summary.setWordWrap(True)
+        self.project_summary.setTextFormat(Qt.PlainText)
+        self.start_page.layout().addWidget(self.project_summary)
+        self.start_page.layout().addStretch()
         self.footer_status = QLabel('Create or open a project to begin')
         self.status = self.footer_status
         self.footer_status.setWordWrap(True)
@@ -375,7 +386,7 @@ class MainWindow(QMainWindow):
         if on_result is not None:
             self.worker.result.connect(on_result)
         self.worker.finished.connect(self.finished); self.worker.start()
-        # Disable editing while a worker owns the state; cancellation stays available in Start/Video.
+        # Disable editing while a worker owns the state; cancellation stays available in Analyze/Video.
         for page in (self.place,self.character,self.scenes_page,self.stills_page): page.setEnabled(False)
         for button in self.video_actions[:-1]: button.setEnabled(False)
         self.timeline.setEnabled(False)
@@ -417,10 +428,10 @@ class MainWindow(QMainWindow):
     def new_project(self):
         def work():
             if self.worker or self.podcast.process: return
-            parent=QFileDialog.getExistingDirectory(self,'Project parent folder')
-            if not parent:return
-            name,ok=QInputDialog.getText(self,'New Project','Project name')
-            if ok:self.load(create_project(Path(parent),name))
+            self.flush_edits()
+            dialog = CreateProjectDialog(self, self.session.root.parent if self.session else None)
+            if dialog.exec() == QDialog.Accepted:
+                self.load(dialog.session)
         self.guarded(work)
 
     def open_project(self):
@@ -446,6 +457,13 @@ class MainWindow(QMainWindow):
         self._project_settings.sync()
 
     def refresh(self):
+        for button in self.start_import_buttons:
+            button.setEnabled(self.session is not None and self.worker is None)
+        self.project_summary.setText(
+            f'Project: {self.session.project.name}\nFolder: {self.session.root}\n'
+            f'Prose: {self.session.project.prose_path or "Not imported"}\n'
+            f'Podcast audio: {self.session.project.audio_path or "Not imported"}'
+            if self.session else 'Create or open a project to import your source files.')
         if self.session and self._timeline_dirty:
             self.commit_timeline_edits()
         self.world_building_list.clear()
@@ -637,7 +655,10 @@ class MainWindow(QMainWindow):
             self.require()
             if self.podcast.process:
                 raise ValueError('Cancel the audio task before replacing sources')
-            path,_=QFileDialog.getOpenFileName(self,'Import '+kind)
+            title = 'Import Prose' if kind == 'prose' else 'Import Podcast Audio'
+            filters = ('Markdown prose (*.md *.markdown *.txt)' if kind == 'prose' else
+                       'Audio (*.mp3 *.wav *.flac *.m4a *.ogg *.opus)')
+            path,_=QFileDialog.getOpenFileName(self, title, '', filters)
             if not path:return
             session=self.session
             def job(cancel,progress):
@@ -1067,7 +1088,7 @@ class MainWindow(QMainWindow):
             self.require()
             from prose_to_video.gui.alignment_settings import AlignmentSettingsDialog
             from prose_to_video.pipeline.audio_alignment import align_project
-            if not self.session.project.audio_path:raise ValueError('Link narration audio in Start first')
+            if not self.session.project.audio_path:raise ValueError('Link narration audio in Analyze first')
             dialog=AlignmentSettingsDialog(self)
             if dialog.exec()!=QDialog.Accepted:return
             settings=dialog.values(allow_download=True)
