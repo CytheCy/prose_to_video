@@ -120,7 +120,10 @@ Cancel a running audio task before saving, switching projects, or closing.
    images change at the next scene's speech start and hold through pauses; the last
    covers trailing audio. Speech spans and display intervals are separate fields.
    Use the audio player's seek/play controls to preview the selected stills against
-   narration. Export MP4 through FFmpeg; Preview Export opens a rendered video.
+   narration. **Export Video** saves an MP4 through FFmpeg automatically in the
+   project's `Video Out/` folder, created with every new project. Part exports use
+   the narration filename; repeat exports get numbered filenames to preserve earlier
+   videos. **Preview Export** opens this folder to choose a rendered video.
 
 **Camera Movement** appears after Camera Position in Scenes. In Video Production,
 each included scene shows its selected still on the left and a movement dropdown on

@@ -46,22 +46,37 @@ state = Workflow(prose_hash=source_hash('A'), scenes=[scene], stills=[still],
 state.save(session.root)
 window = MainWindow()
 window.load(session)
-answers = iter((QMessageBox.No, QMessageBox.Yes))
+answers = iter((QMessageBox.No, QMessageBox.Yes, QMessageBox.Yes))
 prompts = []
 QMessageBox.question = lambda *args: (prompts.append(args[1:3]), next(answers))[1]
 paths = []
-output = session.root / 'output' / 'video.mp4'
+output = session.root / 'Video Out' / 'video.mp4'
+# Older projects may not have the export folder yet.
+output.parent.rmdir()
 QFileDialog.getSaveFileName = lambda *args: (paths.append(args), (str(output), ''))[1]
 plans = []
-FFmpegRenderer.render = lambda self, plan, path, **kwargs: (plans.append(plan), {})[1]
+def render(self, plan, path, **kwargs):
+    plans.append(plan)
+    path.write_bytes(b'video')
+    return {}
+FFmpegRenderer.render = render
 window.run = lambda work, **kwargs: work(Event(), lambda message: None)
 window.render()
 assert len(prompts) == 1 and not paths and not plans
 window.render()
-assert len(prompts) == 2 and len(paths) == 1 and len(plans) == 1
+assert len(prompts) == 2 and not paths and len(plans) == 1
 assert plans[0].audio_fingerprint == source_file_hash(session.project.resolved_audio(session.root))
 assert window.state.timeline_audio_hash == 'old-audio'
 assert output.with_suffix('.mp4.json').is_file()
+window.render()
+assert not paths and len(plans) == 2
+assert output.read_bytes() == b'video'
+assert (output.parent / 'video (2).mp4').is_file()
+assert (output.parent / 'video (2).mp4.json').is_file()
+previews = []
+QFileDialog.getOpenFileName = lambda *args: (previews.append(args), ('', ''))[1]
+window.preview_export()
+assert previews[0][2] == str(output.parent)
 assert window.close()
 '''
     env = {**os.environ, 'QT_QPA_PLATFORM': 'offscreen'}

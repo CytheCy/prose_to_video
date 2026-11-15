@@ -19,7 +19,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog
 from podcast_splitter.core import Project, parse_prose, fingerprint
 from podcast_splitter.engine import export
 from prose_to_video.gui.main_window import MainWindow
-from prose_to_video.models.scene import Scene, source_hash
+from prose_to_video.models.scene import Scene, source_hash, validate_partition
 from prose_to_video.pipeline.stills_workflow import Workflow, Still, Interval, load_workflow, render_plan
 from prose_to_video.pipeline.audio_transcription import source_file_hash
 from prose_to_video.pipeline.manuscript import parse_manuscript
@@ -72,6 +72,7 @@ assert window.audio._loaded_path == session.root / 'output/chapters/01 First.wav
 assert abs(window.production_session.project.audio_duration - 2) < .01
 assert window.video_prose._source_text == 'First words. More words.\n'
 assert [s.identifier for s in window.production_state.scenes] == [s.identifier for s in scenes[:2]]
+validate_partition(window.video_prose._source_text, window.production_state.scenes)
 for scene in window.production_state.scenes:
     assert window.video_prose._source_text[scene.start:scene.end] == scene.text
 assert window.session.project.audio_path == 'source/all.wav'
@@ -110,6 +111,11 @@ assert window.production_session.database.path != session.database.path
 window.video_parts.setCurrentRow(1)
 assert window.production_session.project.audio_path == 'output/chapters/02 Second.wav'
 assert len(window.production_state.scenes) == 1
+assert window.production_state.scenes[0].identifier == scenes[2].identifier
+assert window.production_state.scenes[0].sequence == 1
+validate_partition(window.video_prose._source_text, window.production_state.scenes)
+assert window.production_state.current_still(scenes[2].identifier).identifier == state.current_still(scenes[2].identifier).identifier
+assert [s.sequence for s in state.scenes] == [1, 2, 3]
 assert not window.production_state.timeline
 window.video_parts.setCurrentRow(0)
 assert window.production_state.timeline[0].end == .75

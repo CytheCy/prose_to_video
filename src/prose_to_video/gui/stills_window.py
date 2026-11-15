@@ -16,7 +16,7 @@ from prose_to_video.pipeline.stills_workflow import (Workflow, Identity, Interva
     WORLD_PROMPT_LIMIT)
 from prose_to_video.storage.project_files import (open_project, import_prose, import_audio,
     import_world_building_files, remove_world_building_file, world_building_files,
-    save_project as save_project_files)
+    save_project as save_project_files, VIDEO_OUTPUT_DIR)
 from prose_to_video.utils.prose import read_prose
 from prose_to_video.storage.manuscript import ManuscriptStore
 from prose_to_video.models.scene import Scene, source_hash
@@ -1431,19 +1431,25 @@ class MainWindow(QMainWindow):
                 if answer != QMessageBox.Yes:
                     return
                 approved_audio_hash = current_audio_hash
-            path,_=QFileDialog.getSaveFileName(self,'Export video',str(self.production_session.root / 'output' / (Path(self.production_session.project.audio_path).stem + '.mp4' if self._video_session else 'video.mp4')),'MP4 (*.mp4)')
-            if not path:return
+            folder = self.production_session.root / VIDEO_OUTPUT_DIR
+            folder.mkdir(exist_ok=True)
+            stem = Path(self.production_session.project.audio_path).stem if self._video_session else 'video'
+            path = folder / f'{stem}.mp4'
+            number = 2
+            while path.exists() or path.with_suffix('.mp4.json').exists():
+                path = folder / f'{stem} ({number}).mp4'
+                number += 1
             def job(cancel,progress):
                 from prose_to_video.rendering.ffmpeg_renderer import FFmpegRenderer
                 progress('Preparing video export · Checking scene images, timing, narration and render settings')
                 plan=render_plan(self.production_session,self.production_state,approved_audio_hash=approved_audio_hash)
                 metadata=FFmpegRenderer(self.production_session.root).render(plan,Path(path),cancel=cancel,progress=lambda stage,seconds:progress(f'Exporting {Path(path).name} · {stage}: {seconds:.1f}s processed of {plan.audio_duration:.1f}s'))
-                Path(path+'.json').write_text(plan.model_dump_json(indent=2),encoding='utf-8'); return metadata
+                path.with_suffix('.mp4.json').write_text(plan.model_dump_json(indent=2),encoding='utf-8'); return metadata
             self.run(job, description=f'Export video: {Path(path).name}')
         self.guarded(work)
 
     def preview_export(self):
-        path,_=QFileDialog.getOpenFileName(self,'Preview exported video',str(self.session.root/'output') if self.session else '', 'Video (*.mp4)')
+        path,_=QFileDialog.getOpenFileName(self,'Preview exported video',str(self.session.root/VIDEO_OUTPUT_DIR) if self.session else '', 'Video (*.mp4)')
         if path:QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def closeEvent(self,event):

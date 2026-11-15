@@ -19,8 +19,9 @@ from prose_to_video.utils.prose import count_prose, read_prose
 
 
 LOGGER = logging.getLogger(__name__)
+VIDEO_OUTPUT_DIR = "Video Out"
 PROJECT_DIRS = ("source", "scenes", "alignment", "storyboard", "references", "images",
-                "video_clips", "previews", "output")
+                "video_clips", "previews", "output", VIDEO_OUTPUT_DIR)
 PROSE_EXTENSIONS = {".md", ".markdown", ".txt"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".opus"}
 

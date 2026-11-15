@@ -63,7 +63,10 @@ def load_video_part(session, state, section, source_text):
             raise ValueError('A scene crosses this part’s boundary. Split the scene in Scenes first.')
         a = split_start + len(source_text[original_start:start].replace('\r\n', '\n').replace('\r', '\n'))
         b = split_start + len(source_text[original_start:end].replace('\r\n', '\n').replace('\r', '\n'))
-        scenes.append(scene.model_copy(update={'start': a, 'end': b, 'text': split_text[a:b],
+        # Alignment validates this part as its own manuscript, so its scene order
+        # must also be local. Keep identifiers to share selected stills and timing.
+        scenes.append(scene.model_copy(update={'sequence': len(scenes) + 1,
+                                               'start': a, 'end': b, 'text': split_text[a:b],
                                                'source_version': source_hash(split_text)}))
     storage = f'output/production-parts/{section.identifier}'
     directory = session.root / storage
