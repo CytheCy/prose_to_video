@@ -4,6 +4,73 @@ import subprocess
 import sys
 
 
+def test_scenes_list_omits_excluded_material(tmp_path):
+    script = r'''
+import sys
+from pathlib import Path
+from PySide6.QtWidgets import QApplication, QMessageBox
+from prose_to_video.gui.main_window import MainWindow
+from prose_to_video.models.scene import Scene
+from prose_to_video.pipeline.stills_workflow import load_workflow
+from prose_to_video.storage.project_files import create_project
+
+app = QApplication([])
+window = MainWindow()
+session = create_project(Path(sys.argv[1]), 'filtered scenes')
+window.load(session)
+excluded = Scene(sequence=1, start=0, end=1, text='X',
+    title='Excluded manuscript material', production_included=False)
+first = Scene(sequence=2, start=1, end=3, text='AB', title='First')
+last = Scene(sequence=3, start=3, end=4, text='C', title='Last')
+window.state.scenes = [excluded, first, last]
+window.refresh()
+assert [window.scene_list.item(i).text() for i in range(window.scene_list.count())] == ['2. First', '3. Last']
+window.scene_list.setCurrentRow(0)
+assert window.scene().identifier == first.identifier
+window.fields['title'].setPlainText('Edited first')
+window.save_scene()
+assert load_workflow(session).scenes[1].title == 'Edited first'
+assert window.state.scenes[0] == excluded
+assert window.scene().identifier == first.identifier
+
+# Stills navigation uses scene identity even though the lists have different rows.
+window.still_list.setCurrentRow(2)
+assert window.scene().identifier == last.identifier
+assert window.scene_list.currentRow() == 1
+window.still_list.setCurrentRow(0)
+assert window.scene() is None
+
+# Structural edits operate on the selected scene in the full manuscript.
+window.scene_list.setCurrentRow(0)
+window.prose.selected_source_range = lambda: (2, 3)
+window.split_scene()
+assert [s.text for s in window.state.scenes] == ['X', 'A', 'B', 'C']
+assert window.state.scenes[0] == excluded
+window.scene_list.setCurrentRow(0)
+window.merge_scene()
+assert [s.text for s in window.state.scenes] == ['X', 'AB', 'C']
+assert window.state.scenes[0] == excluded
+
+# A hidden exclusion remains a merge boundary.
+window.state.scenes = [first, excluded, last]
+window.refresh()
+window.scene_list.setCurrentRow(0)
+errors = []
+QMessageBox.warning = lambda *args: errors.append(str(args[-1]))
+window.merge_scene()
+assert errors == ['Cannot merge across manuscript exclusions']
+window.state.scenes = [excluded]
+window.refresh()
+assert window.scene_list.count() == 0 and window.scene() is None
+assert window.close()
+'''
+    result = subprocess.run([sys.executable, '-c', script, str(tmp_path)],
+                            capture_output=True, text=True, timeout=30,
+                            env={**os.environ, 'QT_QPA_PLATFORM': 'offscreen',
+                                 'XDG_CONFIG_HOME': str(tmp_path / 'config')})
+    assert result.returncode == 0, result.stderr
+
+
 def test_editor_autosave_and_close_guard(tmp_path):
     script = r'''
 import sys

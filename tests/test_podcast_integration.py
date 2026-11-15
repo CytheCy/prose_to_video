@@ -28,8 +28,13 @@ with wave.open(str(audio), 'wb') as stream:
     stream.setframerate(8000)
     stream.writeframes(b'\0\0' * 80000)
 panel = window.podcast
-panel.choose_prose(str(prose))
-panel.choose_audio(str(audio))
+source_form = panel.output_picker.parentWidget().layout()
+for picker in (panel.prose_picker, panel.audio_picker, panel.output_picker):
+    assert picker.isHidden()
+    assert source_form.labelForField(picker).isHidden()
+from prose_to_video.storage.project_files import import_audio, import_prose
+window.source_imported(import_prose(window.session, prose), 'prose')
+window.source_imported(import_audio(window.session, audio), 'audio')
 assert window.session.project.prose_path == 'source/story.md'
 assert panel.project.audio == str(window.session.root / 'source/narration.wav')
 assert 'first chapter' in window.source_view._source_text
@@ -57,6 +62,9 @@ assert panel.project.part_padding == 0
 assert panel.format.currentText() == 'MP3'
 moved = root / 'Moved'
 shutil.move(old, moved)
+# Old custom destinations must not take exports outside the shared project.
+data['output'] = str(root / 'external-exports')
+(moved / 'podcast-splitter.json').write_text(json.dumps(data))
 prose.unlink()
 audio.unlink()
 from prose_to_video.storage.project_files import open_project
@@ -69,6 +77,9 @@ assert panel.project.waveform == [.1, .2, .3]
 assert panel.model.currentData() == 'small.en'
 assert panel.format.currentText() == 'FLAC'
 assert panel.project.output == str(moved / 'output/chapters')
+assert panel.dirty
+window.save_project()
+assert json.loads((moved / 'podcast-splitter.json').read_text())['output'] == 'output/chapters'
 # Exercise the embedded subprocess with only project-owned files after moving.
 import time
 panel.format.setCurrentText('WAV')
@@ -83,6 +94,7 @@ assert panel.process is None, 'Audio worker did not finish'
 assert not errors, errors
 exported = moved / 'output/chapters/01 One.wav'
 assert exported.is_file()
+assert not (root / 'external-exports').exists()
 assert exported.with_suffix('.md').is_file()
 with wave.open(str(exported), 'rb') as stream:
     assert stream.getnframes() / stream.getframerate() == 3.5

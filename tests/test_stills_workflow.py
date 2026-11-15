@@ -467,6 +467,53 @@ app.processEvents()
     assert result.returncode == 0, result.stderr
 
 
+def test_analyze_story_completion_sound(monkeypatch, tmp_path):
+    import subprocess
+    import sys
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'config'))
+    result = subprocess.run([sys.executable, '-c', """
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QTimer
+from PySide6.QtWidgets import QApplication
+import prose_to_video.gui.stills_window as gui
+from prose_to_video.storage.project_files import create_project
+
+app = QApplication([])
+window = gui.MainWindow()
+sounds = []
+QApplication.beep = lambda: sounds.append('beep')
+gui.make_provider = lambda settings: None
+with TemporaryDirectory() as folder:
+    window.load(create_project(Path(folder), 'Sound test'))
+    for outcome in ('success', 'canceled', 'failed'):
+        def analyze(session, state, provider, settings, cancel, progress):
+            if outcome == 'failed':
+                raise ValueError('Analysis failed')
+            if outcome == 'canceled':
+                cancel.set()
+            return state
+        gui.analyze = analyze
+        sounds.clear()
+        window.analyze()
+        assert window.worker is not None
+        loop = QEventLoop()
+        window.worker.finished.connect(loop.quit)
+        QTimer.singleShot(5000, loop.quit)
+        loop.exec()
+        assert window.worker is None
+        assert sounds == (['beep'] if outcome == 'success' else []), outcome
+        if outcome == 'success':
+            assert 'Analysis complete' in window.footer_status.text()
+window.close()
+window.deleteLater()
+QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+app.processEvents()
+"""], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+
+
 def test_successful_generation_snapshots_references_and_selects_immediately(tmp_path):
     import os
     os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
@@ -832,3 +879,48 @@ def test_analysis_saves_camera_movement(tmp_path):
     analyze(session, state, CameraAI(), AISettings())
     assert state.scenes[0].camera_movement == 'zoom_out_pan_right'
     assert load_workflow(session).scenes[0].camera_movement == 'zoom_out_pan_right'
+
+
+@pytest.mark.parametrize('mode', ['ai', 'paragraph'])
+def test_checked_parts_can_be_expanded_without_losing_completed_work(tmp_path, mode):
+    from prose_to_video.storage.manuscript import ManuscriptStore
+    text = '# First\nMira waits.\n\n# Second\nMira turns.\n'
+    session = session_with_text(tmp_path, text)
+    store = ManuscriptStore(session.database)
+    second = store.sections(text)[1]
+    store.decide(text, second.identifier, second.classification, False, False)
+    state = Workflow(scene_detection=mode)
+    provider = FakeAI()
+    analyze(session, state, provider, AISettings())
+    assert len([s for s in state.scenes if s.production_included]) == 1
+    assert len([c for schema, c in provider.calls if schema is Staging]) == 1
+    first = state.scenes[0]
+    first.final_prompt = 'Keep this edited prompt'
+    store.decide(text, second.identifier, second.classification, True, False)
+    analyze(session, state, provider, AISettings())
+    validate_partition(text, state.scenes)
+    assert len(state.scenes) == 2
+    assert all(s.production_included and s.final_prompt for s in state.scenes)
+    assert state.scenes[0].identifier == first.identifier
+    assert state.scenes[0].final_prompt == 'Keep this edited prompt'
+    assert len([c for schema, c in provider.calls if schema is Staging]) == 2
+    store.decide(text, second.identifier, second.classification, False, False)
+    analyze(session, state, provider, AISettings())
+    assert not state.scenes[1].production_included
+    store.decide(text, second.identifier, second.classification, True, False)
+    analyze(session, state, provider, AISettings())
+    assert all(s.production_included for s in state.scenes)
+    assert len([c for schema, c in provider.calls if schema is Staging]) == 2
+
+
+def test_no_checked_prose_stops_before_ai_requests(tmp_path):
+    from prose_to_video.storage.manuscript import ManuscriptStore
+    text = '# First\nMira waits.'
+    session = session_with_text(tmp_path, text)
+    store = ManuscriptStore(session.database)
+    section = store.sections(text)[0]
+    store.decide(text, section.identifier, section.classification, False, False)
+    provider = FakeAI()
+    with pytest.raises(ValueError, match='Check at least one story part'):
+        analyze(session, Workflow(), provider, AISettings())
+    assert not provider.calls

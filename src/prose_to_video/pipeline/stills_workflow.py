@@ -104,6 +104,7 @@ class Workflow(Record):
     timeline_audio_hash: str = ''
     timeline_mode: Literal['nearest', 'strict'] = 'nearest'
     analysis_plan: list[tuple[int, int, bool]] = Field(default_factory=list)
+    analysis_inclusion: str = ''
     checkpoints: dict[str, dict] = Field(default_factory=dict)
     jobs: list[dict] = Field(default_factory=list)
     migration_notes: list[str] = Field(default_factory=list)
@@ -480,11 +481,15 @@ def analyze(session, state, provider, settings, cancel=None, progress=lambda *_:
     digest = source_hash(text)
     if not text.strip(): raise ValueError('Import nonempty prose first')
     from prose_to_video.storage.manuscript import ManuscriptStore
+    from prose_to_video.pipeline.manuscript import inclusion_fingerprint
     sections = ManuscriptStore(session.database).sections(text)
+    inclusion = inclusion_fingerprint(sections)
     heading_ranges = [(s.heading_start, s.heading_end) for s in sections
                       if s.heading_start is not None]
     if not _scene_prose(text, 0, len(text), heading_ranges):
         raise ValueError('The manuscript has no prose paragraphs to turn into scenes')
+    if not any(s.included and _scene_prose(text, s.body_start, s.end, heading_ranges) for s in sections):
+        raise ValueError('Check at least one story part with prose in Start before analyzing')
     if state.prose_hash != digest and (state.prose_hash or state.scenes or state.checkpoints):
         if cancel.is_set():
             raise ValueError('Canceled; existing analysis retained')
@@ -506,6 +511,37 @@ def analyze(session, state, provider, settings, cancel=None, progress=lambda *_:
         state.analysis_scene_detection = state.scene_detection
         state.save(session.root)
         progress('Prose changed; rebuilding analysis and prompts, preserving reference images')
+    if state.analysis_inclusion != inclusion:
+        # Reuse completed work wherever the new choices still allow the same
+        # scene boundary. Newly included placeholder scenes need staging.
+        try:
+            validate_partition(text, state.scenes)
+        except ValueError:
+            pass
+        else:
+            state.scenes = [state.scenes[index].model_copy(update={
+                'start': start, 'end': end, 'text': text[start:end], 'sequence': number})
+                for number, (index, start, end) in enumerate(prose_ranges(
+                    text, [(s.start, s.end) for s in state.scenes], heading_ranges), 1)]
+        retained = []
+        for scene in state.scenes:
+            choices = {s.included for s in sections
+                       if s.body_start < scene.end and s.end > scene.start
+                       and _scene_prose(text, s.body_start, s.end, heading_ranges)}
+            if not choices:
+                retained.append(scene)
+                continue
+            if len(choices) != 1:
+                continue
+            included = choices.pop()
+            if included and not scene.production_included and not scene.final_prompt:
+                continue
+            scene.production_included = included
+            retained.append(scene)
+        state.scenes = retained
+        state.analysis_plan = []
+        state.analysis_inclusion = inclusion
+        state.save(session.root)
     spans = units(text, max(200, settings.chunk_chars // 2))
     batches, batch, size = [], [], 0
     for index, (start, end) in enumerate(spans, 1):
@@ -519,10 +555,13 @@ def analyze(session, state, provider, settings, cancel=None, progress=lambda *_:
             raise ValueError('Prose changed during analysis; completed work retained')
     def request(key, instructions, content, schema, description):
         check()
-        # Identity/beat checkpoints belong to a fixed source pass, independent of
-        # catalog additions made by subsequent chunks. A retry must reuse success.
-        cache_content = {} if key.startswith(('catalog-', 'beats-')) else content
-        cache_key = source_hash(json.dumps([digest, key, instructions, cache_content], sort_keys=True))
+        # Identity checkpoints are independent of catalog additions. Beat
+        # checkpoints also track passages, which can change as parts are added.
+        cache_content = {} if key.startswith('catalog-') else content
+        cache_inputs = [digest, key, instructions, cache_content]
+        if key.startswith('beats-'):
+            cache_inputs.append(inclusion)
+        cache_key = source_hash(json.dumps(cache_inputs, sort_keys=True))
         if cache_key in state.checkpoints:
             progress(description + ' · Reusing a saved response from the current story')
             return schema.model_validate(state.checkpoints[cache_key])
@@ -630,7 +669,8 @@ Do not invent events or relationships. Use existing IDs for existing identities.
         except ValueError:
             pass  # An interrupted analysis resumes its frozen plan below.
     # Exclusions are boundaries; never let a visual beat cross included/excluded material.
-    cuts = sorted({0, len(text), *(s.body_start for s in sections), *(s.end for s in sections)})
+    cuts = sorted({0, len(text), *(s.body_start for s in sections), *(s.end for s in sections),
+                   *(s.start for s in state.scenes), *(s.end for s in state.scenes)})
     blocks = []
     for lo, hi in zip(cuts, cuts[1:]):
         included = any(s.included and s.body_start <= lo < s.end for s in sections)

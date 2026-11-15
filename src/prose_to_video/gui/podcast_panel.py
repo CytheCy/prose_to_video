@@ -3,6 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtWidgets import QLabel
 from podcast_splitter.app import Window
 from podcast_splitter.core import Project, parse_prose
 from prose_to_video.storage.project_files import import_audio, import_prose
@@ -13,6 +14,12 @@ class PodcastPanel(Window):
         self.host = host
         self.session = None
         super().__init__()
+        # Sources come from Start; exports stay inside the shared project.
+        source_form = self.output_picker.parentWidget().layout()
+        for picker in (self.prose_picker, self.audio_picker, self.output_picker):
+            source_form.setRowVisible(picker, False)
+        source_form.addRow('Sources', QLabel('Uses prose and podcast audio imported on Start'))
+        source_form.addRow('Split parts', QLabel('Saved to output/chapters/ in this project'))
         self.setParent(host.workspace_tabs)
         self.setWindowFlags(Qt.Widget)
         # Project commands belong to the application menu, with one save target.
@@ -45,7 +52,7 @@ class PodcastPanel(Window):
         """Load relative state against the current project, including moved folders."""
         path = session.root / 'podcast-splitter.json'
         project = Project.load(str(path)) if path.exists() else Project()
-        for key in ('prose', 'audio', 'output'):
+        for key in ('prose', 'audio'):
             value = getattr(project, key)
             if value and not Path(value).is_absolute():
                 setattr(project, key, str(session.root / value))
@@ -54,13 +61,14 @@ class PodcastPanel(Window):
         self.playback_mode = self.preview_offset = self.play_until = None
         self.session, self.project = session, project
         self.project_path = str(path)
-        if not project.output:
-            project.output = str(session.root / 'output' / 'chapters')
+        output = str(session.root / 'output' / 'chapters')
+        output_changed = project.output != 'output/chapters' and project.output != output
+        project.output = output
         self.sync_sources(session)
         self.player.setSource(QUrl.fromLocalFile(self.project.audio))
         self.refresh()
         self.format.setCurrentText(project.export_format)
-        self.dirty = False
+        self.dirty = output_changed
         self.setEnabled(True)
 
     def sync_sources(self, session, changed=None):

@@ -10,7 +10,7 @@ import sys
 import time
 import wave
 from pathlib import Path
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QApplication, QFileDialog, QPushButton, QDialogButtonBox
 from prose_to_video.gui.main_window import MainWindow
 from prose_to_video.gui.create_project_dialog import CreateProjectDialog
@@ -19,6 +19,12 @@ root = Path(sys.argv[1])
 window = MainWindow()
 buttons = {b.text(): b for b in window.start_page.findChildren(QPushButton)}
 assert not buttons['Import Prose'].isEnabled()
+assert 'Import Prose' not in [b.text() for b in window.start.findChildren(QPushButton)]
+assert window.story_parts.count() == 0
+assert window.selected_story_parts.count() == 0
+assert 'Choose parts on Start' in window.selected_parts_summary.text()
+assert not window.start_analyze_button.isEnabled()
+assert not buttons['Deselect All'].isEnabled()
 
 def fill_dialog():
     dialog = app.activeModalWidget()
@@ -33,7 +39,7 @@ assert window.session.root == root / 'My Project'
 assert (window.session.root / 'project.sqlite').is_file()
 assert buttons['Import Prose'].isEnabled()
 prose = root / 'narrative.md'
-prose.write_text('# Chapter\nThe traveler arrived.')
+prose.write_text('# Chapter One\nThe traveler arrived.\n\n# Chapter Two\nThe traveler left.')
 audio = root / 'podcast.wav'
 with wave.open(str(audio), 'wb') as stream:
     stream.setparams((1, 2, 8000, 0, 'NONE', 'not compressed'))
@@ -51,6 +57,56 @@ assert window.podcast.project.prose == str(window.session.root / 'source/narrati
 assert window.podcast.project.audio == str(window.session.root / 'source/podcast.wav')
 assert 'narrative.md' in window.project_summary.text()
 assert 'podcast.wav' in window.project_summary.text()
+assert window.story_parts.count() == 2
+assert 'Chapter One' in window.story_parts.item(0).text()
+assert window.story_parts.item(1).checkState() == Qt.Checked
+assert [window.selected_story_parts.item(i).text() for i in range(2)] == [
+    window.story_parts.item(i).text() for i in range(2)]
+app.processEvents()
+assert window.source_view.toPlainText() == 'The traveler arrived.\n\n\n\nThe traveler left.'
+assert window.prose.toPlainText() == prose.read_text()
+window.story_parts.item(1).setCheckState(Qt.Unchecked)
+app.processEvents()
+assert window.source_view.toPlainText() == 'The traveler arrived.\n\n'
+assert window.selected_story_parts.count() == 1
+assert window.selected_story_parts.item(0).text() == window.story_parts.item(0).text()
+window.refresh()
+app.processEvents()
+assert window.source_view.toPlainText() == 'The traveler arrived.\n\n'
+assert window.story_parts.item(1).checkState() == Qt.Unchecked
+assert '1 of 2' in window.parts_help.text()
+window.load(window.session)
+app.processEvents()
+assert window.source_view.toPlainText() == 'The traveler arrived.\n\n'
+assert window.story_parts.item(1).checkState() == Qt.Unchecked
+assert window.selected_story_parts.count() == 1
+assert window.selected_story_parts.item(0).text() == window.story_parts.item(0).text()
+assert buttons['Deselect All'].isEnabled()
+window.story_parts.item(1).setCheckState(Qt.Checked)
+buttons['Deselect All'].click()
+app.processEvents()
+assert window.source_view.toPlainText() == ''
+assert not window.analyze_story_button.isEnabled()
+assert all(window.story_parts.item(i).checkState() == Qt.Unchecked
+           for i in range(window.story_parts.count()))
+assert '0 of 2' in window.parts_help.text()
+assert window.selected_story_parts.count() == 0
+assert 'No story parts selected' in window.selected_parts_summary.text()
+assert not window.start_analyze_button.isEnabled()
+assert not buttons['Deselect All'].isEnabled()
+window.load(window.session)
+assert all(window.story_parts.item(i).checkState() == Qt.Unchecked
+           for i in range(window.story_parts.count()))
+window.story_parts.item(0).setCheckState(Qt.Checked)
+assert window.start_analyze_button.isEnabled()
+assert buttons['Deselect All'].isEnabled()
+assert window.selected_story_parts.count() == 1
+assert window.selected_story_parts.item(0).text() == window.story_parts.item(0).text()
+window.story_parts.item(0).setCheckState(Qt.Unchecked)
+window.story_parts.item(1).setCheckState(Qt.Checked)
+app.processEvents()
+assert window.source_view.toPlainText() == 'The traveler left.'
+assert window.analyze_story_button.isEnabled()
 # An existing folder is preserved and the dialog remains open for correction.
 dialog = CreateProjectDialog(window, root)
 dialog.name.setText('My Project')

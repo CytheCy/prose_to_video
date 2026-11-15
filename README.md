@@ -42,16 +42,17 @@ On **Start**, click **Create Project**, choose the parent folder and project nam
 then click **Save** to create the project folder. Use **Import Prose** and
 **Import Podcast Audio** to copy source files into the project. Existing projects
 can be opened with **File → Open Project**. The splitter and video workflow use the same copies
-in the project's `source/` folder; importing or replacing a source in either tab
-updates the other. Splitter Markdown supports `.md`, `.markdown`, and `.txt` with
+in the project's `source/` folder; importing or replacing a source on Start
+updates the splitter. Podcast Splitter uses the sources imported on Start automatically,
+without separate file pickers. Splitter Markdown supports `.md`, `.markdown`, and `.txt` with
 ATX headings; prose without headings remains usable by the video workflow.
 
 The original splitter interface and engine are included in `src/podcast_splitter/`
 under their MIT license. Select headings, choose a local speech model, analyze,
 preview and edit IN/OUT cuts, approve flagged chapters, widen all parts, and export
 MP3, FLAC, or WAV with matching Markdown files. Existing exports are never
-overwritten. The default export folder is `output/chapters/` inside the project;
-you can still choose another destination. First analysis downloads the selected
+overwritten. Split parts are always saved to `output/chapters/` inside the shared
+project folder, with no separate export destination to choose. First analysis downloads the selected
 speech model; models and transcript caches use the user's normal cache directory.
 
 **File → Save Project** saves both workflows. Splitter edits also save automatically
@@ -66,9 +67,7 @@ Cancel a running audio task before saving, switching projects, or closing.
 1. In **Start**, create a project and import prose and optional podcast audio.
    In **Analyze**, configure AI/image/export settings and save a project visual style and image density.
    Imports preserve the original files. Re-import the active prose file after editing it to reload its changed text; other duplicate source filenames are rejected.
-   To replace edited narration, use **Link / Replace Narration Audio** and select
-   the edited file, including one with the same filename. Then rebuild the timeline
-   in Video Production and review any manual cuts. Scenes and still images are kept.
+   Narration audio for Analyze comes from the **Podcast Splitter** exports.
 
 2. **Analyze Story** first reads the whole story in bounded requests to establish
    character/place identities, then plans visual beats using validated sentence IDs,

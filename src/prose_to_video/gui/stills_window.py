@@ -8,7 +8,7 @@ from uuid import uuid4
 from PySide6.QtCore import QThread, Signal, Slot, Qt, QUrl, QSignalBlocker, QSettings, QEvent
 from PySide6.QtGui import QPixmap, QDesktopServices, QAction, QKeySequence, QPainter
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QPlainTextEdit, QListWidget, QFormLayout, QScrollArea, QSplitter,
+    QPushButton, QLabel, QPlainTextEdit, QListWidget, QListWidgetItem, QFormLayout, QScrollArea, QSplitter,
     QFileDialog, QInputDialog, QMessageBox, QDialog, QDialogButtonBox, QComboBox, QTableWidget, QTableWidgetItem, QLineEdit, QDoubleSpinBox)
 from prose_to_video.pipeline.stills_workflow import (Workflow, Identity, Interval, load_workflow,
     analyze, dependency, regenerate_prompt, generate_still, store_still, assemble_timeline,
@@ -18,6 +18,7 @@ from prose_to_video.storage.project_files import (open_project, import_prose, im
     import_world_building_files, remove_world_building_file, world_building_files,
     save_project as save_project_files)
 from prose_to_video.utils.prose import read_prose
+from prose_to_video.storage.manuscript import ManuscriptStore
 from prose_to_video.models.scene import Scene, source_hash
 from prose_to_video.models.camera_movement import CAMERA_MOVEMENT_IDS, CAMERA_RENDER_FIELDS
 from prose_to_video.gui.prose_viewer import ProseViewer
@@ -92,7 +93,18 @@ class MainWindow(QMainWindow):
         self.project_summary.setWordWrap(True)
         self.project_summary.setTextFormat(Qt.PlainText)
         self.start_page.layout().addWidget(self.project_summary)
-        self.start_page.layout().addStretch()
+        self.start_page.layout().addWidget(QLabel('Prose story parts'))
+        self.parts_help = QLabel('Import prose to choose which parts to work with first.')
+        self.parts_help.setWordWrap(True)
+        self.start_page.layout().addWidget(self.parts_help)
+        self.story_parts = QListWidget()
+        self.story_parts.itemChanged.connect(self.story_part_changed)
+        self.start_page.layout().addWidget(self.story_parts, 1)
+        self.deselect_all_button, self.start_analyze_button = self.buttons(self.start_page, [
+            ('Deselect All', self.deselect_all_story_parts),
+            ('Analyze Checked Parts', self.analyze)])
+        self._parts_text = ''
+        self._parts_sections = []
         self.footer_status = QLabel('Create or open a project to begin')
         self.status = self.footer_status
         self.footer_status.setWordWrap(True)
@@ -104,8 +116,13 @@ class MainWindow(QMainWindow):
         self.start.layout().addWidget(start_split)
         start_controls = QWidget()
         QVBoxLayout(start_controls)
-        self.buttons(start_controls, [('Import Prose', lambda:self.import_source('prose')),
-            ('Link / Replace Narration Audio', lambda:self.import_source('audio')),
+        self.selected_parts_summary = QLabel()
+        self.selected_parts_summary.setWordWrap(True)
+        start_controls.layout().addWidget(self.selected_parts_summary)
+        self.selected_story_parts = QListWidget()
+        self.selected_story_parts.setMaximumHeight(180)
+        start_controls.layout().addWidget(self.selected_story_parts)
+        self.analyze_story_button, _ = self.buttons(start_controls, [
             ('Analyze Story', self.analyze),
             ('Stop Analyzing', self.cancel)], vertical=True)
         self.buttons(start_controls, [('Add World Building Files', self.add_world_building_files)], vertical=True)
@@ -376,6 +393,9 @@ class MainWindow(QMainWindow):
         self.require()
         self._worker_snapshot = self.edit_snapshot()
         self.worker=Task(work,self)
+        self.story_parts.setEnabled(False)
+        self.deselect_all_button.setEnabled(False)
+        self.start_analyze_button.setEnabled(False)
         self.update_undo_action()
         self.update_world_building_delete_button()
         self.worker.description = description
@@ -474,9 +494,10 @@ class MainWindow(QMainWindow):
         scene_id=self.scene().identifier if self.scene() else None
         path=self.session.project.resolved_prose(self.session.root) if self.session else None
         if path:
-            text=read_prose(path); self.prose.show_text(text); self.source_view.show_text(text)
+            text=read_prose(path); self.prose.show_text(text)
         else:
             self.prose.clear_story(); self.source_view.clear_story()
+        self.refresh_story_parts(text if path else '')
         for kind,listing in self.catalog_lists.items():
             previous = self.identity(kind)
             values = listed_identities(self.state, kind)
@@ -491,10 +512,13 @@ class MainWindow(QMainWindow):
             self.show_identity(kind)
         self.scene_list.clear(); self.still_list.clear()
         for s in self.state.scenes:
-            self.scene_list.addItem(f'{s.sequence}. {s.title}'+(' [excluded]' if not s.production_included else ''))
+            if s.production_included:
+                item = QListWidgetItem(f'{s.sequence}. {s.title}')
+                item.setData(Qt.UserRole, s.identifier)
+                self.scene_list.addItem(item)
             self.still_list.addItem(f'{s.sequence}. {s.title} · '+('image selected' if self.state.current_still(s.identifier) else 'missing'))
         if scene_id:
-            self.scene_list.setCurrentRow(next((i for i,s in enumerate(self.state.scenes) if s.identifier==scene_id),0))
+            self.scene_list.setCurrentRow(self.scene_row(scene_id, default=0))
         self.timeline_mode.setCurrentIndex(self.timeline_mode.findData(self.state.timeline_mode))
         self.refresh_timeline_table()
         self.refresh_video_scenes()
@@ -508,6 +532,66 @@ class MainWindow(QMainWindow):
                 self.audio.set_audio(audio, self.session.project.audio_duration)
         self.sync_timeline_markers()
         self.update_video_preview()
+
+    def refresh_story_parts(self, text):
+        self._parts_text = text
+        self._parts_sections = ManuscriptStore(self.session.database).sections(text) if self.session and text else []
+        with QSignalBlocker(self.story_parts):
+            self.story_parts.clear()
+            for index, section in enumerate(self._parts_sections, 1):
+                title = section.heading or ('Opening prose' if section.level is None else 'Untitled part')
+                item = QListWidgetItem(f'{section.number if section.number is not None else index}. {title}')
+                item.setData(Qt.UserRole, section.identifier)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked if section.included else Qt.Unchecked)
+                item.setToolTip(text[section.body_start:section.end].strip()[:500] or 'No story text in this part.')
+                self.story_parts.addItem(item)
+        self.story_parts.setEnabled(bool(self._parts_sections) and self.worker is None)
+        self.update_parts_summary()
+
+    def update_parts_summary(self):
+        selected = [self.story_parts.item(i) for i in range(self.story_parts.count())
+                    if self.story_parts.item(i).checkState() == Qt.Checked]
+        count = len(selected)
+        self.selected_parts_summary.setText(
+            f'Selected story parts ({count})' if count else 'No story parts selected. Choose parts on Start.')
+        self.selected_story_parts.clear()
+        for source in selected:
+            item = QListWidgetItem(source.text())
+            item.setToolTip(source.toolTip())
+            self.selected_story_parts.addItem(item)
+        self.selected_story_parts.setVisible(bool(count))
+        selected_ids = {item.data(Qt.UserRole) for item in selected}
+        selected_prose = '\n\n'.join(
+            self._parts_text[section.body_start:section.end]
+            for section in self._parts_sections if section.identifier in selected_ids)
+        if selected_prose:
+            self.source_view.show_text(selected_prose)
+        else:
+            self.source_view.clear_story('Choose prose parts on Start to analyze them here.')
+        self.parts_help.setText(
+            f'{count} of {self.story_parts.count()} parts checked. Choices save automatically. '
+            'Analyze checked parts to apply your selection; you can choose more parts later.'
+            if self._parts_sections else 'Import prose to choose which parts to work with first.')
+        self.start_analyze_button.setEnabled(bool(count) and self.worker is None)
+        self.analyze_story_button.setEnabled(bool(count) and self.worker is None)
+        self.deselect_all_button.setEnabled(bool(count) and self.worker is None)
+
+    def deselect_all_story_parts(self):
+        if not self.session or self.worker:
+            return
+        for index in range(self.story_parts.count()):
+            self.story_parts.item(index).setCheckState(Qt.Unchecked)
+
+    def story_part_changed(self, item):
+        def work():
+            self.require()
+            section = next(s for s in self._parts_sections if s.identifier == item.data(Qt.UserRole))
+            ManuscriptStore(self.session.database).decide(
+                self._parts_text, section.identifier, section.classification,
+                item.checkState() == Qt.Checked, section.review)
+            self.update_parts_summary()
+        self.guarded(work)
 
     def refresh_video_scenes(self):
         layout = self.video_scene_cards.layout()
@@ -883,8 +967,13 @@ class MainWindow(QMainWindow):
             self.run(job, done, description=f'Generate reference · {character.name}')
         self.guarded(work)
 
+    def scene_row(self, identifier, default=-1):
+        return next((i for i in range(self.scene_list.count())
+                     if self.scene_list.item(i).data(Qt.UserRole) == identifier), default)
+
     def scene(self):
-        row=self.scene_list.currentRow(); return self.state.scenes[row] if 0<=row<len(self.state.scenes) else None
+        item = self.scene_list.currentItem()
+        return next((s for s in self.state.scenes if item and s.identifier == item.data(Qt.UserRole)), None)
 
     def persist_edits(self):
         self._unsaved_edits = True
@@ -969,7 +1058,7 @@ class MainWindow(QMainWindow):
             updated.manual_fields = sorted(set(scene.manual_fields + [name]))
             if name == 'final_prompt':
                 updated.prompt_dependency = dependency(self.state, updated)
-            self.state.scenes[self.scene_list.currentRow()] = updated
+            self.state.scenes[self.state.scenes.index(scene)] = updated
             self.persist_edits()
             if name in CAMERA_RENDER_FIELDS:
                 self.refresh_video_scenes()
@@ -996,7 +1085,7 @@ class MainWindow(QMainWindow):
             changed=[k for k in changes if getattr(s,k)!=getattr(updated,k)]
             updated.manual_fields=list(set(s.manual_fields+changed))
             if 'final_prompt' in changed:updated.prompt_dependency=dependency(self.state,updated)
-            self.state.scenes[self.scene_list.currentRow()]=updated; self.state.save(self.session.root); self.refresh()
+            self.state.scenes[self.state.scenes.index(s)]=updated; self.state.save(self.session.root); self.refresh()
         self.guarded(work)
 
     def regenerate(self):
@@ -1015,14 +1104,16 @@ class MainWindow(QMainWindow):
             cut=span[0]; a=s.model_dump(); b=s.model_dump()
             a.update(end=cut,text=s.text[:cut-s.start],final_prompt='',prompt_dependency='')
             b.update(identifier=str(uuid4()),start=cut,text=s.text[cut-s.start:],final_prompt='',prompt_dependency='')
-            i=self.scene_list.currentRow(); self.state.scenes[i:i+1]=[Scene(**a),Scene(**b)]
+            i=self.state.scenes.index(s); self.state.scenes[i:i+1]=[Scene(**a),Scene(**b)]
             self.renumber()
         self.guarded(work)
 
     def merge_scene(self):
         def work():
-            self.require(); i=self.scene_list.currentRow()
-            if i<0 or i+1>=len(self.state.scenes):return
+            self.require(); s=self.scene()
+            if not s:return
+            i=self.state.scenes.index(s)
+            if i+1>=len(self.state.scenes):return
             a,b=self.state.scenes[i:i+2]
             if a.production_included!=b.production_included:raise ValueError('Cannot merge across manuscript exclusions')
             if any(t.scene_id in {a.identifier,b.identifier} for t in self.state.timeline):raise ValueError('Timeline placements preserved; merge requires a project without these placements')
@@ -1040,7 +1131,7 @@ class MainWindow(QMainWindow):
     def show_still(self,*_):
         scene=self.still_scene(); self.candidates.clear(); self.preview.clear(); self.still_details.clear()
         if not scene:return
-        self.scene_list.setCurrentRow(self.still_list.currentRow()); self.prose.highlight_range(scene.start,scene.end)
+        self.scene_list.setCurrentRow(self.scene_row(scene.identifier)); self.prose.highlight_range(scene.start,scene.end)
         assets=[s for s in self.state.stills if s.scene_id==scene.identifier]
         for s in assets:self.candidates.addItem(s.identifier+(' · selected' if self.state.selected.get(scene.identifier)==s.identifier else ''))
         asset=self.state.current_still(scene.identifier)
