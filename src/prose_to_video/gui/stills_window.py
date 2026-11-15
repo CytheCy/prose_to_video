@@ -71,6 +71,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__(); self.setWindowTitle('Prose to Video'); self.resize(1350, 950)
         self.session = None; self.state = Workflow(); self.worker = None
+        self._video_session = None
+        self._video_state = None
+        self._video_part_id = None
         self._unsaved_edits = False
         self._scene_drafts = {}
         self._timeline_dirty = False
@@ -217,9 +220,21 @@ class MainWindow(QMainWindow):
         self.preview = QLabel(); self.preview.setMinimumHeight(220); self.preview.setAlignment(Qt.AlignCenter)
         self.stills_page.layout().addWidget(self.preview)
         self.still_details = QPlainTextEdit(); self.still_details.setReadOnly(True); self.stills_page.layout().addWidget(self.still_details)
-        self.candidates = QListWidget(); self.stills_page.layout().addWidget(self.candidates)
         self.buttons(self.stills_page,[('Generate Selected',lambda:self.generate('still')), ('Generate Missing',lambda:self.generate('missing')),
-            ('Regenerate Selected',lambda:self.generate('still')), ('Import Image',self.import_still), ('Select Candidate',self.select_candidate)])
+            ('Regenerate Selected',lambda:self.generate('still')), ('Import Image',self.import_still)])
+        self.video.layout().addWidget(QLabel('Selected story parts · choose one to produce'))
+        self.video_parts = QListWidget()
+        self.video_parts.setSelectionMode(QListWidget.SingleSelection)
+        self.video_parts.setMaximumHeight(140)
+        self.video_parts.currentItemChanged.connect(self.select_video_part)
+        self.video.layout().addWidget(self.video_parts)
+        self.video_sources = QLabel('Choose a part to load its Podcast Splitter exports.')
+        self.video_sources.setWordWrap(True)
+        self.video_sources.setTextFormat(Qt.PlainText)
+        self.video.layout().addWidget(self.video_sources)
+        self.video_prose = ProseViewer()
+        self.video_prose.setMaximumHeight(150)
+        self.video.layout().addWidget(self.video_prose)
         self.timeline_mode = QComboBox()
         self.timeline_mode.addItem('Nearest fit — build despite narration discrepancies', 'nearest')
         self.timeline_mode.addItem('Strict — require verified narration throughout', 'strict')
@@ -228,7 +243,7 @@ class MainWindow(QMainWindow):
         self.video_actions = self.buttons(self.video,[('Build Timeline from Stills + Audio',self.build), ('Align Narration…',self.align),
             ('Review Narration…',self.correct_alignment), ('Preview Export',self.preview_export), ('Export Video',self.render), ('Cancel Work',self.cancel)])
         self.video.layout().addWidget(QLabel('Press Play to preview the video. Drag timeline markers to adjust cuts; manual intervals survive rebuilds.'))
-        self.video_actions[0].setToolTip('Use every included scene’s selected still and the full narration. Automatically aligns audio when needed; first use may download local speech models.')
+        self.video_actions[0].setToolTip('Use every included scene’s selected still and the selected part’s split narration. Automatically aligns audio when needed; first use may download local speech models.')
         self.video_preview = VideoPreview()
         self.video.layout().addWidget(self.video_preview)
         self.timeline = QTableWidget(0, 5, self)
@@ -294,6 +309,8 @@ class MainWindow(QMainWindow):
         return {
             'root': self.session.root if self.session else None,
             'state': self.state.model_copy(deep=True),
+            'video_state': self._video_state.model_copy(deep=True) if self._video_state is not None else None,
+            'video_part_id': self._video_part_id,
             'drafts': dict(self._scene_drafts),
             'scene_row': self.scene_list.currentRow(),
             'still_row': self.still_list.currentRow(),
@@ -302,13 +319,13 @@ class MainWindow(QMainWindow):
         }
 
     def record_edit(self, before, group=None):
-        if not self.session or before['root'] != self.session.root:
+        if not self.session or before['root'] != self.session.root or before['video_part_id'] != self._video_part_id:
             return
-        if before['state'] == self.state and before['drafts'] == self._scene_drafts:
+        if before['state'] == self.state and before['drafts'] == self._scene_drafts and before['video_state'] == self._video_state:
             return
         if self._undo_history:
             latest = self._undo_history[-1]
-            if latest['state'] == before['state'] and latest['drafts'] == before['drafts']:
+            if latest['state'] == before['state'] and latest['drafts'] == before['drafts'] and latest['video_state'] == before['video_state']:
                 return
         now = monotonic()
         if group is None or group != self._undo_group or now - self._undo_time > 1:
@@ -355,11 +372,14 @@ class MainWindow(QMainWindow):
         restored = before['state'].model_copy(deep=True)
         try:
             restored.save(self.session.root)
+            if before['video_state'] is not None:
+                before['video_state'].save(self.session.root)
         except OSError as exc:
             QMessageBox.warning(self, 'Could not undo change', str(exc))
             return
         self._undo_history.pop()
         self.state = restored
+        self._video_state = before['video_state'].model_copy(deep=True) if before['video_state'] is not None else None
         self._scene_drafts = dict(before['drafts'])
         self._unsaved_edits = False
         self._undo_group = None
@@ -393,6 +413,7 @@ class MainWindow(QMainWindow):
         self.require()
         self._worker_snapshot = self.edit_snapshot()
         self.worker=Task(work,self)
+        self.video_parts.setEnabled(False)
         self.story_parts.setEnabled(False)
         self.deselect_all_button.setEnabled(False)
         self.start_analyze_button.setEnabled(False)
@@ -429,6 +450,7 @@ class MainWindow(QMainWindow):
 
     def finished(self):
         self.worker.deleteLater(); self.worker=None
+        self.video_parts.setEnabled(True)
         self.update_world_building_delete_button()
         for page in (self.place,self.character,self.scenes_page,self.stills_page): page.setEnabled(True)
         for button in self.video_actions[:-1]: button.setEnabled(True)
@@ -468,6 +490,7 @@ class MainWindow(QMainWindow):
         self._undo_group = None
         self._scene_drafts.clear()
         self.podcast.bind(session)
+        self._video_session = self._video_state = self._video_part_id = None
         self.session=session; self.state=state; self.refresh()
         self.update_undo_action()
         self.message(session.project.name + (' · '+ '; '.join(self.state.migration_notes) if self.state.migration_notes else ''))
@@ -516,7 +539,9 @@ class MainWindow(QMainWindow):
                 item = QListWidgetItem(f'{s.sequence}. {s.title}')
                 item.setData(Qt.UserRole, s.identifier)
                 self.scene_list.addItem(item)
-            self.still_list.addItem(f'{s.sequence}. {s.title} · '+('image selected' if self.state.current_still(s.identifier) else 'missing'))
+                item = QListWidgetItem(f'{s.sequence}. {s.title} · '+('image selected' if self.state.current_still(s.identifier) else 'missing'))
+                item.setData(Qt.UserRole, s.identifier)
+                self.still_list.addItem(item)
         if scene_id:
             self.scene_list.setCurrentRow(self.scene_row(scene_id, default=0))
         self.timeline_mode.setCurrentIndex(self.timeline_mode.findData(self.state.timeline_mode))
@@ -527,9 +552,7 @@ class MainWindow(QMainWindow):
             if path:
                 text=read_prose(path)
                 if self.state.prose_hash and source_hash(text)!=self.state.prose_hash:self.message('Prose changed; click Analyze Story to rebuild scenes, places, characters and prompts while keeping reference images')
-            audio=self.session.project.resolved_audio(self.session.root)
-            if audio != self.audio._loaded_path:
-                self.audio.set_audio(audio, self.session.project.audio_duration)
+            self.refresh_production_audio()
         self.sync_timeline_markers()
         self.update_video_preview()
 
@@ -561,6 +584,7 @@ class MainWindow(QMainWindow):
             item.setToolTip(source.toolTip())
             self.selected_story_parts.addItem(item)
         self.selected_story_parts.setVisible(bool(count))
+        self.refresh_video_parts(selected)
         selected_ids = {item.data(Qt.UserRole) for item in selected}
         selected_prose = '\n\n'.join(
             self._parts_text[section.body_start:section.end]
@@ -593,6 +617,118 @@ class MainWindow(QMainWindow):
             self.update_parts_summary()
         self.guarded(work)
 
+    @property
+    def production_session(self):
+        return self._video_session or self.session
+
+    @property
+    def production_state(self):
+        return self._video_state if self._video_state is not None else self.state
+
+    @production_state.setter
+    def production_state(self, value):
+        if self._video_state is not None:
+            self._video_state = value
+        else:
+            self.state = value
+
+    @property
+    def awaiting_video_part(self):
+        return self._video_state is None and any(s.level is not None for s in self._parts_sections)
+
+    def require_video_part(self):
+        self.require()
+        if self._video_session is None and not any(s.level is not None for s in self._parts_sections):
+            return
+        if self._video_session is None:
+            raise ValueError('Select one part in Video Production and export its files in Podcast Splitter first.')
+        from prose_to_video.pipeline.video_parts import load_video_part
+        self._video_state.save(self.session.root)
+        section = next(s for s in self._parts_sections if s.identifier == self._video_part_id)
+        self._video_session, self._video_state = load_video_part(self.session, self.state, section, self._parts_text)
+
+    def refresh_video_parts(self, selected):
+        ids = {item.data(Qt.UserRole) for item in selected}
+        if self._video_part_id not in ids:
+            if self._video_part_id is not None:
+                self._undo_history.clear()
+                self._undo_group = None
+                self.update_undo_action()
+            self._video_session = self._video_state = self._video_part_id = None
+            self.video_sources.setText('Choose a part to load its Podcast Splitter exports.')
+            self.video_prose.clear_story()
+        with QSignalBlocker(self.video_parts):
+            self.video_parts.clear()
+            for source in selected:
+                item = QListWidgetItem(source.text())
+                item.setData(Qt.UserRole, source.data(Qt.UserRole))
+                self.video_parts.addItem(item)
+                if item.data(Qt.UserRole) == self._video_part_id:
+                    self.video_parts.setCurrentItem(item)
+        self.video_parts.setEnabled(self.worker is None)
+        # Refresh shared still selections without losing part-local cuts.
+        if self._video_state is not None:
+            self._video_state.selected = dict(self.state.selected)
+            self._video_state.stills = list(self.state.stills)
+        if hasattr(self, 'audio'):
+            self.refresh_production_audio()
+            if self._video_state is None:
+                self.refresh_timeline_table()
+                self.refresh_video_scenes()
+                self.sync_timeline_markers()
+                self.update_video_preview()
+
+    def select_video_part(self, item, previous=None):
+        if self.worker:
+            return
+        def work():
+            self.require()
+            if item is None:
+                return
+            from prose_to_video.pipeline.video_parts import load_video_part
+            section = next(s for s in self._parts_sections if s.identifier == item.data(Qt.UserRole))
+            session, state = load_video_part(self.session, self.state, section, self._parts_text)
+            self._video_session, self._video_state = session, state
+            self._video_part_id = section.identifier
+            self._undo_history.clear()
+            self._undo_group = None
+            self.update_undo_action()
+            self.video_sources.setText(f'Prose: {session.project.prose_path}\nAudio: {session.project.audio_path}')
+            self.video_prose.show_text(read_prose(session.project.resolved_prose(session.root)))
+            self.audio.set_audio(None)
+            self.refresh_production_audio()
+            self.timeline_mode.setCurrentIndex(self.timeline_mode.findData(state.timeline_mode))
+            self.refresh_timeline_table()
+            self.refresh_video_scenes()
+            self.sync_timeline_markers()
+            self.update_video_preview()
+            self.message(f'Loaded {item.text()} · {len(state.scenes)} scenes · {session.project.audio_duration:.1f}s split audio')
+        try:
+            work()
+        except Exception as exc:
+            # A failed selection must never leave another part's audio active.
+            self._undo_history.clear()
+            self._undo_group = None
+            self.update_undo_action()
+            self._video_session = self._video_state = self._video_part_id = None
+            with QSignalBlocker(self.video_parts):
+                self.video_parts.setCurrentRow(-1)
+            self.video_sources.setText(str(exc))
+            self.video_prose.clear_story()
+            self.audio.set_audio(None)
+            self.timeline.setRowCount(0)
+            self.refresh_video_scenes()
+            self.video_preview.show_frame(None, None, 0, None)
+            self.message(str(exc))
+
+    def refresh_production_audio(self):
+        session = self.production_session
+        audio = session.project.resolved_audio(session.root) if session else None
+        if self._video_session is None and any(s.level is not None for s in self._parts_sections):
+            audio = None
+        if audio != self.audio._loaded_path:
+            self.audio.set_audio(audio, session.project.audio_duration if session and audio else None)
+
     def refresh_video_scenes(self):
         layout = self.video_scene_cards.layout()
         while layout.count():
@@ -600,15 +736,15 @@ class MainWindow(QMainWindow):
             if item.widget():
                 item.widget().deleteLater()
         self.camera_movement_boxes = {}
-        for scene in self.state.scenes:
-            if not scene.production_included:
+        for scene in self.production_state.scenes:
+            if (self.awaiting_video_part) or not scene.production_included:
                 continue
             card = QWidget(); row = QHBoxLayout(card)
             preview = QLabel('No selected still'); preview.setFixedSize(180, 104)
             preview.setAlignment(Qt.AlignCenter)
-            asset = self.state.current_still(scene.identifier)
-            if asset and self.session:
-                pixmap = QPixmap(str(self.session.root / asset.path))
+            asset = self.production_state.current_still(scene.identifier)
+            if asset and self.production_session:
+                pixmap = QPixmap(str(self.production_session.root / asset.path))
                 preview.setPixmap(pixmap.scaled(180, 104, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             row.addWidget(preview)
             controls = QWidget(); form = QFormLayout(controls)
@@ -616,14 +752,14 @@ class MainWindow(QMainWindow):
             movement = CameraMovementComboBox(); movement.addItems(CAMERA_MOVEMENT_IDS)
             movement.setCurrentText(scene.camera_movement)
             movement.setToolTip('Directions describe camera travel. Moving shots fill the frame and crop safely.')
-            movement.setEnabled(self.session is not None and not self.worker)
+            movement.setEnabled(self.production_session is not None and not self.worker)
             form.addRow('Camera Movement', movement)
             focal = QWidget(); focal_row = QHBoxLayout(focal); focal_row.setContentsMargins(0, 0, 0, 0)
             for axis in ('x', 'y'):
                 spin = QDoubleSpinBox(); spin.setRange(0, 1); spin.setDecimals(3); spin.setSingleStep(.05)
                 spin.setValue(getattr(scene, 'camera_focal_' + axis))
                 spin.setToolTip('Normalized image coordinate: 0 = left/top, 1 = right/bottom')
-                spin.setEnabled(self.session is not None and not self.worker)
+                spin.setEnabled(self.production_session is not None and not self.worker)
                 spin.valueChanged.connect(lambda value, sid=scene.identifier, a=axis:
                     self.update_scene_camera(sid, 'camera_focal_' + a, value))
                 focal_row.addWidget(QLabel(axis.upper())); focal_row.addWidget(spin)
@@ -637,16 +773,16 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
     def update_scene_camera(self, identifier, name, value):
-        if not self.session or self.worker:
+        if not self.production_session or self.worker:
             return
-        scene = next(s for s in self.state.scenes if s.identifier == identifier)
+        scene = next(s for s in self.production_state.scenes if s.identifier == identifier)
         if getattr(scene, name) == value:
             return
         before = self.edit_snapshot()
         updated = Scene.model_validate(scene.model_dump() | {name: value})
         updated.manual_fields = sorted(set(scene.manual_fields + [name]))
-        self.state.scenes[self.state.scenes.index(scene)] = updated
-        self.persist_edits()
+        self.production_state.scenes[self.production_state.scenes.index(scene)] = updated
+        self.production_state.save(self.production_session.root)
         self.record_edit(before, ('scene', identifier, name))
         self.update_video_preview()
         if self.scene() and self.scene().identifier == identifier:
@@ -654,9 +790,13 @@ class MainWindow(QMainWindow):
 
     def refresh_timeline_table(self):
         self._updating_timeline = True
-        self.timeline.setRowCount(len(self.state.timeline))
-        for row, interval in enumerate(self.state.timeline):
-            scene=next((s for s in self.state.scenes if s.identifier==interval.scene_id), None)
+        if self.awaiting_video_part:
+            self.timeline.setRowCount(0)
+            self._updating_timeline = False
+            return
+        self.timeline.setRowCount(len(self.production_state.timeline))
+        for row, interval in enumerate(self.production_state.timeline):
+            scene=next((s for s in self.production_state.scenes if s.identifier==interval.scene_id), None)
             values=[(scene.title if scene else interval.scene_id)+(' · manual' if interval.manual else '')+(' · approximate' if interval.estimated else ''), interval.start, interval.end, interval.speech_start, interval.speech_end]
             for col, value in enumerate(values):
                 item=QTableWidgetItem(str(value))
@@ -665,30 +805,32 @@ class MainWindow(QMainWindow):
         self._updating_timeline = False
 
     def sync_timeline_markers(self):
-        intervals = self.state.timeline
+        intervals = self.production_state.timeline
+        if self.awaiting_video_part:
+            intervals = []
         self.audio.waveform.set_boundaries([intervals[0].start, *(t.end for t in intervals)] if intervals else [])
         if intervals and self.audio.waveform.duration <= 0:
             self.audio.waveform.set_data([], intervals[-1].end)
 
     def update_video_preview(self, seconds=None):
-        if not self.session or not self.state.timeline:
+        if not self.production_session or not self.production_state.timeline or (self.awaiting_video_part):
             self.video_preview.show_frame(None, None, 0, None)
             return
         if seconds is None:
             seconds = self.audio.player.position() / 1000
-        index = next((i for i, t in enumerate(self.state.timeline) if t.start <= seconds < t.end), None)
-        if index is None and seconds >= self.state.timeline[-1].end:
-            index = len(self.state.timeline) - 1
-        interval = self.state.timeline[index] if index is not None else None
+        index = next((i for i, t in enumerate(self.production_state.timeline) if t.start <= seconds < t.end), None)
+        if index is None and seconds >= self.production_state.timeline[-1].end:
+            index = len(self.production_state.timeline) - 1
+        interval = self.production_state.timeline[index] if index is not None else None
         if interval is None:
             self.video_preview.show_frame(None, None, 0, None)
             return
-        scene = next((s for s in self.state.scenes if s.identifier == interval.scene_id), None)
-        asset = self.state.current_still(interval.scene_id)
+        scene = next((s for s in self.production_state.scenes if s.identifier == interval.scene_id), None)
+        asset = self.production_state.current_still(interval.scene_id)
         if scene is None or asset is None:
-            self.video_preview.show_frame(None, None, 0, self.state.render_settings)
+            self.video_preview.show_frame(None, None, 0, self.production_state.render_settings)
             return
-        settings = self.state.render_settings
+        settings = self.production_state.render_settings
         camera = still_camera(scene.camera_movement, settings, scene.camera_focal_x,
                               scene.camera_focal_y, scene.identifier)
         progress = (seconds - interval.start) / (interval.end - interval.start)
@@ -698,23 +840,23 @@ class MainWindow(QMainWindow):
         transition_duration = transition_frames / settings.frame_rate
         transition_progress = 1.0
         if index and transition != 'Cut' and transition_duration and seconds < interval.start + transition_duration:
-            previous = self.state.timeline[index - 1]
-            previous_scene = next((s for s in self.state.scenes if s.identifier == previous.scene_id), None)
-            previous_asset = self.state.current_still(previous.scene_id)
+            previous = self.production_state.timeline[index - 1]
+            previous_scene = next((s for s in self.production_state.scenes if s.identifier == previous.scene_id), None)
+            previous_asset = self.production_state.current_still(previous.scene_id)
             if previous_scene and previous_asset:
-                previous_path = self.session.root / previous_asset.path
+                previous_path = self.production_session.root / previous_asset.path
                 previous_camera = still_camera(previous_scene.camera_movement, settings,
                                                previous_scene.camera_focal_x,
                                                previous_scene.camera_focal_y, previous_scene.identifier)
                 transition_progress = (seconds - interval.start) / transition_duration
-        self.video_preview.show_frame(self.session.root / asset.path, camera, progress, settings,
+        self.video_preview.show_frame(self.production_session.root / asset.path, camera, progress, settings,
                                       previous_path=previous_path, previous_camera=previous_camera,
                                       transition=transition, transition_progress=transition_progress)
 
     def move_still_boundary(self, index, seconds):
         def work():
             self.require()
-            values = [t.model_copy(deep=True) for t in self.state.timeline]
+            values = [t.model_copy(deep=True) for t in self.production_state.timeline]
             if not 0 < index < len(values):
                 return
             left, right = values[index - 1:index + 1]
@@ -722,10 +864,10 @@ class MainWindow(QMainWindow):
                 return
             left.end = right.start = seconds
             left.manual = right.manual = True
-            validate_timeline(values, self.session.project.audio_duration)
-            updated = self.state.model_copy(update={'timeline': values})
-            updated.save(self.session.root)
-            self.state = updated
+            validate_timeline(values, self.production_session.project.audio_duration)
+            updated = self.production_state.model_copy(update={'timeline': values})
+            updated.save(self.production_session.root)
+            self.production_state = updated
             self.refresh_timeline_table()
             self.update_video_preview()
             self.message(f'Still {index} → {index + 1} moved to {seconds:.3f}s · Saved')
@@ -790,6 +932,7 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def source_imported(self,session,kind='prose'):
+        self._video_session = self._video_state = self._video_part_id = None
         self.session=session
         self.podcast.sync_sources(session, kind)
         if kind == 'audio':
@@ -988,6 +1131,8 @@ class MainWindow(QMainWindow):
         def work():
             self.require()
             self.state.save(self.session.root)
+            if self._video_state is not None:
+                self._video_state.save(self.session.root)
             self.podcast.save_shared(force=True)
             self.session = save_project_files(self.session)
             self.podcast.session = self.session
@@ -1126,14 +1271,13 @@ class MainWindow(QMainWindow):
         self.state.save(self.session.root); self.refresh()
 
     def still_scene(self):
-        row=self.still_list.currentRow(); return self.state.scenes[row] if 0<=row<len(self.state.scenes) else None
+        item = self.still_list.currentItem()
+        return next((s for s in self.state.scenes if item and s.identifier == item.data(Qt.UserRole)), None)
 
     def show_still(self,*_):
-        scene=self.still_scene(); self.candidates.clear(); self.preview.clear(); self.still_details.clear()
+        scene=self.still_scene(); self.preview.clear(); self.still_details.clear()
         if not scene:return
         self.scene_list.setCurrentRow(self.scene_row(scene.identifier)); self.prose.highlight_range(scene.start,scene.end)
-        assets=[s for s in self.state.stills if s.scene_id==scene.identifier]
-        for s in assets:self.candidates.addItem(s.identifier+(' · selected' if self.state.selected.get(scene.identifier)==s.identifier else ''))
         asset=self.state.current_still(scene.identifier)
         if asset:
             self.preview.setPixmap(QPixmap(str(self.session.root/asset.path)).scaled(800,350,Qt.KeepAspectRatio,Qt.SmoothTransformation))
@@ -1167,41 +1311,34 @@ class MainWindow(QMainWindow):
                 description=f'Import still: {Path(path).name} · Checking and saving the image for scene {scene.sequence}')
         self.guarded(work)
 
-    def select_candidate(self):
-        def work():
-            self.require(); scene=self.still_scene(); row=self.candidates.currentRow()
-            assets=[s for s in self.state.stills if scene and s.scene_id==scene.identifier]
-            if 0<=row<len(assets):self.state.selected[scene.identifier]=assets[row].identifier; self.state.save(self.session.root); self.show_still()
-        self.guarded(work)
-
     def align(self):
         def work():
-            self.require()
+            self.require_video_part()
             from prose_to_video.gui.alignment_settings import AlignmentSettingsDialog
             from prose_to_video.pipeline.audio_alignment import align_project
-            if not self.session.project.audio_path:raise ValueError('Link narration audio in Analyze first')
+            if not self.production_session.project.audio_path:raise ValueError('Link narration audio in Analyze first')
             dialog=AlignmentSettingsDialog(self)
             if dialog.exec()!=QDialog.Accepted:return
             settings=dialog.values(allow_download=True)
-            self.run(lambda cancel,progress:align_project(self.session.project.resolved_prose(self.session.root),
-                self.session.project.resolved_audio(self.session.root),self.state.scenes,self.session.database,
+            self.run(lambda cancel,progress:align_project(self.production_session.project.resolved_prose(self.production_session.root),
+                self.production_session.project.resolved_audio(self.production_session.root),self.production_state.scenes,self.production_session.database,
                 settings,cancel=cancel,progress=lambda stage,n,total:progress(f'Aligning narration · {stage}: {n}/{total}')),
                 description='Align narration · Matching spoken words to prose for scene timing')
         self.guarded(work)
 
     def correct_alignment(self):
         def work():
-            self.require()
+            self.require_video_part()
             from prose_to_video.gui.transcript_review import TranscriptReviewDialog
             from prose_to_video.pipeline.transcript_review import prepare_review, realign_review
-            run, text = prepare_review(self.session, self.state.scenes)
-            dialog = TranscriptReviewDialog(self.session, run, text, self)
+            run, text = prepare_review(self.production_session, self.production_state.scenes)
+            dialog = TranscriptReviewDialog(self.production_session, run, text, self)
             self.audio.player.pause()
             if dialog.exec() != QDialog.Accepted: return
             def apply(cancel, progress):
-                realign_review(self.session, self.state.scenes, run, dialog.draft,
+                realign_review(self.production_session, self.production_state.scenes, run, dialog.draft,
                     cancel=cancel, progress=progress)
-                return assemble_timeline(self.session, self.state, cancel, progress)
+                return assemble_timeline(self.production_session, self.production_state, cancel, progress)
             self.run(apply, lambda intervals:self.message(
                 f'Narration checked; timeline ready with {len(intervals)} stills. Play to preview or Export Video.'),
                 description='Review narration · Applying transcript corrections, realigning words and rebuilding the timeline')
@@ -1209,9 +1346,9 @@ class MainWindow(QMainWindow):
 
     def build(self):
         def work():
-            self.require()
+            self.require_video_part()
             mode = self.timeline_mode.currentData()
-            self.run(lambda cancel,progress:assemble_timeline(self.session,self.state,cancel,progress,timing_mode=mode),
+            self.run(lambda cancel,progress:assemble_timeline(self.production_session,self.production_state,cancel,progress,timing_mode=mode),
                 lambda intervals:self.message(
                     f"{'Approximate timeline' if any(t.estimated for t in intervals) else 'Timeline'} ready: "
                     f'{len(intervals)} stills · {intervals[-1].end:.1f}s of narration. Preview and adjust cuts, or Export Video.'),
@@ -1232,19 +1369,19 @@ class MainWindow(QMainWindow):
         if not self._timeline_dirty:
             return
         before = self.edit_snapshot()
-        values=[t.model_copy(deep=True) for t in self.state.timeline]
+        values=[t.model_copy(deep=True) for t in self.production_state.timeline]
         for row, interval in enumerate(values):
             interval.start=float(self.timeline.item(row,1).text())
             interval.end=float(self.timeline.item(row,2).text())
-        if [t.scene_id for t in values]!=[t.scene_id for t in self.state.timeline]:raise ValueError('Preserve scene order and IDs')
-        validate_timeline(values,self.session.project.audio_duration)
-        for a,b in zip(values,self.state.timeline):
+        if [t.scene_id for t in values]!=[t.scene_id for t in self.production_state.timeline]:raise ValueError('Preserve scene order and IDs')
+        validate_timeline(values,self.production_session.project.audio_duration)
+        for a,b in zip(values,self.production_state.timeline):
             if (a.speech_start,a.speech_end)!=(b.speech_start,b.speech_end):raise ValueError('Speech spans come from alignment; edit display start/end only')
             a.manual=b.manual or a.start!=b.start or a.end!=b.end
-        if values != self.state.timeline:
-            updated = self.state.model_copy(update={'timeline': values})
-            updated.save(self.session.root)
-            self.state = updated
+        if values != self.production_state.timeline:
+            updated = self.production_state.model_copy(update={'timeline': values})
+            updated.save(self.production_session.root)
+            self.production_state = updated
         self._timeline_dirty = False
         self.record_edit(before)
         self.update_undo_action()
@@ -1252,15 +1389,15 @@ class MainWindow(QMainWindow):
 
     def render(self):
         def work():
-            self.require()
+            self.require_video_part()
             from prose_to_video.pipeline.audio_transcription import source_file_hash
-            audio = self.session.project.resolved_audio(self.session.root)
+            audio = self.production_session.project.resolved_audio(self.production_session.root)
             if not audio: raise ValueError('Link narration audio first')
             current_audio_hash = source_file_hash(audio)
             approved_audio_hash = None
-            if current_audio_hash != self.state.timeline_audio_hash:
+            if current_audio_hash != self.production_state.timeline_audio_hash:
                 # Check timing and assets before asking the user to approve this audio.
-                plan = render_plan(self.session, self.state, approved_audio_hash=current_audio_hash)
+                plan = render_plan(self.production_session, self.production_state, approved_audio_hash=current_audio_hash)
                 answer = QMessageBox.question(self, 'Export anyway?',
                     f'Audio changed since the timeline was built. The saved cuts cover the current '
                     f'{plan.audio_duration:.3f}s narration. Export anyway with this audio and these cuts?',
@@ -1268,13 +1405,13 @@ class MainWindow(QMainWindow):
                 if answer != QMessageBox.Yes:
                     return
                 approved_audio_hash = current_audio_hash
-            path,_=QFileDialog.getSaveFileName(self,'Export video',str(self.session.root/'output'/'video.mp4'),'MP4 (*.mp4)')
+            path,_=QFileDialog.getSaveFileName(self,'Export video',str(self.production_session.root / 'output' / (Path(self.production_session.project.audio_path).stem + '.mp4' if self._video_session else 'video.mp4')),'MP4 (*.mp4)')
             if not path:return
             def job(cancel,progress):
                 from prose_to_video.rendering.ffmpeg_renderer import FFmpegRenderer
                 progress('Preparing video export · Checking scene images, timing, narration and render settings')
-                plan=render_plan(self.session,self.state,approved_audio_hash=approved_audio_hash)
-                metadata=FFmpegRenderer(self.session.root).render(plan,Path(path),cancel=cancel,progress=lambda stage,seconds:progress(f'Exporting {Path(path).name} · {stage}: {seconds:.1f}s processed of {plan.audio_duration:.1f}s'))
+                plan=render_plan(self.production_session,self.production_state,approved_audio_hash=approved_audio_hash)
+                metadata=FFmpegRenderer(self.production_session.root).render(plan,Path(path),cancel=cancel,progress=lambda stage,seconds:progress(f'Exporting {Path(path).name} · {stage}: {seconds:.1f}s processed of {plan.audio_duration:.1f}s'))
                 Path(path+'.json').write_text(plan.model_dump_json(indent=2),encoding='utf-8'); return metadata
             self.run(job, description=f'Export video: {Path(path).name}')
         self.guarded(work)

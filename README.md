@@ -101,8 +101,12 @@ Cancel a running audio task before saving, switching projects, or closing.
    provider/job, identities and references. Unsupported reference limits produce an
    actionable error. Negative prompts on providers without that feature are visibly
    appended as Avoid instructions and recorded in the request snapshot.
-6. In **Video Production**, click **Build Timeline from Stills + Audio** to assemble
-   every included scene's selected still with the full narration in one step. It reuses
+6. In **Video Production**, choose one of the parts checked on **Start** from the list
+   at the top. This loads that part's matching Markdown and audio exported by
+   **Podcast Splitter** into `output/chapters/`. Export the part there first if its
+   files are missing. Click **Build Timeline from Stills + Audio** to assemble only
+   that part's included scenes and split narration. Each part keeps its own alignment,
+   camera settings and timeline cuts when you switch parts or reopen the project. It reuses
    current word alignment or aligns narration automatically with the default local
    speech model (first use may download model weights). **Align Narration…** remains
    available for custom alignment settings. Timing comes from aligned source words,
@@ -133,8 +137,8 @@ keep the window open so changes can be corrected or saving retried.
 verified word matches where possible, interpolates missing scene boundaries between
 nearby matches, and falls back to prose-length proportions when no matches are available.
 Narration discrepancies do not block this mode. Approximate rows are labeled; preview
-and adjust their display cuts, then Save Timeline Edits or export. The full audio and
-all included stills remain on the timeline, and alignment flags remain available for review.
+and adjust their display cuts, then Save Timeline Edits or export. The selected part's full split audio and
+its included stills remain on the timeline, and alignment flags remain available for review.
 Choose **Strict** to require verified narration throughout.
 
 For optional transcript correction and precise timing, open **Review Narration…**:

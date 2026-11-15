@@ -33,12 +33,15 @@ assert load_workflow(session).scenes[1].title == 'Edited first'
 assert window.state.scenes[0] == excluded
 assert window.scene().identifier == first.identifier
 
-# Stills navigation uses scene identity even though the lists have different rows.
-window.still_list.setCurrentRow(2)
+# Both lists omit exclusions, and stills navigation uses the scene identity.
+assert [window.still_list.item(i).text() for i in range(window.still_list.count())] == ['2. Edited first · missing', '3. Last · missing']
+window.still_list.setCurrentRow(1)
+assert window.still_scene().identifier == last.identifier
 assert window.scene().identifier == last.identifier
 assert window.scene_list.currentRow() == 1
 window.still_list.setCurrentRow(0)
-assert window.scene() is None
+assert window.still_scene().identifier == first.identifier
+assert window.scene().identifier == first.identifier
 
 # Structural edits operate on the selected scene in the full manuscript.
 window.scene_list.setCurrentRow(0)
@@ -62,6 +65,7 @@ assert errors == ['Cannot merge across manuscript exclusions']
 window.state.scenes = [excluded]
 window.refresh()
 assert window.scene_list.count() == 0 and window.scene() is None
+assert window.still_list.count() == 0 and window.still_scene() is None
 assert window.close()
 '''
     result = subprocess.run([sys.executable, '-c', script, str(tmp_path)],
