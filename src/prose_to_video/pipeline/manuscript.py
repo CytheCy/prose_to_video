@@ -11,7 +11,7 @@ import re
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
-from prose_to_video.utils.prose import WORD_RE
+from prose_to_video.utils.prose import WORD_RE, HASH_HEADING
 
 CLASSIFICATIONS = ("Narrated Story", "Heading or Chapter Label", "Editorial Note",
                    "Excluded from Production", "Requires Review")
@@ -20,7 +20,7 @@ FORMATS = ("dramatic", "dialogue", "radio", "television", "advertisement", "news
            "screen interface", "internal reflection", "action", "montage")
 VIEWPOINTS = ("direct", "radio", "television", "video call", "surveillance", "drone",
               "recorded footage", "screen interface", "illustrative")
-_ATX = re.compile(r"^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+_ATX = HASH_HEADING
 _SETEXT = re.compile(r"^[ \t]{0,3}(=+|-+)[ \t]*$")
 _NUMBERED = re.compile(r"^(\d+)(?:[.):-]|[ \t]+)[ \t]*(.+)$")
 _YEAR = re.compile(r"\b(?:19|20|21)\d{2}\b")
@@ -74,12 +74,10 @@ def _headings(text: str) -> list[tuple[int, int, str, int]]:
         if re.match(r"^[ \t]{0,3}(```|~~~)", raw):
             fenced = not fenced
             continue
-        if fenced:
-            continue
         match = _ATX.match(raw)
         if match:
             result.append((line.start(), line.end(), match.group(2).strip(), len(match.group(1))))
-        elif i and _SETEXT.match(raw) and lines[i - 1].group().strip() and not _ATX.match(lines[i - 1].group().rstrip("\r\n")):
+        elif not fenced and i and _SETEXT.match(raw) and lines[i - 1].group().strip() and not _ATX.match(lines[i - 1].group().rstrip("\r\n")):
             previous = lines[i - 1]
             result.append((previous.start(), line.end(), previous.group().strip(), 1 if raw.lstrip().startswith("=") else 2))
     return result
@@ -113,7 +111,7 @@ def _format(body: str, heading: str) -> tuple[tuple[str, ...], str]:
 
 def classify_narrative(text: str, heading: str = "") -> tuple[tuple[str, ...], str]:
     """Suggest local scene format without treating a whole section as one scene."""
-    return _format(text, heading)
+    return _format(text, "")
 
 
 def parse_manuscript(text: str) -> list[ManuscriptSection]:
@@ -136,7 +134,7 @@ def parse_manuscript(text: str) -> list[ManuscriptSection]:
         elif not heading and _EDITORIAL.search(compact[:200]):
             classification, included, review, reason = "Requires Review", False, True, "Unheaded possible instruction"
         else: classification, included, review, reason = "Narrated Story", True, False, "Story content suggested"
-        formats, viewpoint = _format(body, title)
+        formats, viewpoint = _format(body, "")
         years = tuple(dict.fromkeys([*(int(m.group()) for m in _YEAR.finditer(body)),
             *(2000 + _TENS[m.group(2).lower()] + _ONES.get((m.group(3) or "").lower(), 0)
               for m in _SPELLED_YEAR.finditer(body))]))
@@ -172,25 +170,17 @@ def inclusion_fingerprint(sections: list[ManuscriptSection]) -> str:
 def scenes_match_inclusion(scenes, sections: list[ManuscriptSection]) -> bool:
     """Detect decisions that require scene boundary reconciliation."""
     if not scenes: return False
-    starts = {scene.start for scene in scenes}
-    transitions = {sections[i].start for i in range(1, len(sections))
-                   if sections[i].included != sections[i - 1].included
-                   and sections[i - 1].body_start < sections[i - 1].end}
-    if not transitions <= starts: return False
     for scene in scenes:
-        expected = any(s.included and s.body_start < scene.end and s.end > scene.start
-                       for s in sections)
-        if scene.production_included != expected: return False
+        choices = {s.included for s in sections
+                   if s.body_start < s.end and s.body_start < scene.end and s.end > scene.start}
+        if choices != {scene.production_included}: return False
     return True
 
 
 def chronology_claims(text: str, sections: list[ManuscriptSection]) -> list[dict]:
     claims = []
     for section in sections:
-        # A dated heading is evidence for the section even when the body omits
-        # the date. Multiple years in a section remain uncertain.
-        heading_years = [int(m.group()) for m in _YEAR.finditer(section.heading)]
-        year = section.explicit_years[0] if section.explicit_years else heading_years[0] if heading_years else None
+        year = section.explicit_years[0] if section.explicit_years else None
         for match in _AGE_CLAIM.finditer(text, section.body_start, section.end):
             word = match.group("at") or match.group("is") or match.group("adjective")
             name = match.group("at_name") or match.group("name") or match.group("adj_name")
@@ -229,8 +219,6 @@ def chronology_timeline(text: str, sections: list[ManuscriptSection]) -> list[di
     """Keep presentation position separate from supported story-year ordering."""
     events = []
     for index, section in enumerate(sections, 1):
-        heading_text = text[section.heading_start:section.heading_end] if section.heading_start is not None else ""
-        heading_match = _YEAR.search(heading_text)
         opening = text[section.body_start:min(section.end, section.body_start + 150)]
         opening_match = re.search(r"\b(?:the year is|in the year)\s+((?:19|20|21)\d{2}|twenty[- ](?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?)", opening, re.I)
         if opening_match:
@@ -242,11 +230,6 @@ def chronology_timeline(text: str, sections: list[ManuscriptSection]) -> list[di
             evidence_start = section.body_start + opening_match.start(1)
             evidence_end = section.body_start + opening_match.end(1)
             confidence = "explicit narration year"
-        elif heading_match:
-            year = int(heading_match.group())
-            evidence_start = section.heading_start + heading_match.start()
-            evidence_end = section.heading_start + heading_match.end()
-            confidence = "heading year; review narration context"
         else:
             year = evidence_start = evidence_end = None
             confidence = "undated"
@@ -293,13 +276,6 @@ def recurring_candidates(text: str, sections: list[ManuscriptSection]) -> dict[s
                        for c in chronology_claims(text, [section])]
         candidates += [("locations", m.group(1), m.start(1), m.end(1)) for m in location_pattern.finditer(body)
                        if m.group(1).split()[-1].casefold() in location_endings]
-        if section.heading_start is not None:
-            heading_offset = text.find(section.heading, section.heading_start, section.heading_end)
-            candidates += [("locations", m.group(1),
-                            heading_offset + m.start(1) - section.body_start,
-                            heading_offset + m.end(1) - section.body_start)
-                           for m in location_pattern.finditer(section.heading)
-                           if heading_offset >= 0 and m.group(1).split()[-1].casefold() in location_endings]
         candidates += [("objects", m.group(1), m.start(1), m.end(1)) for m in object_pattern.finditer(body)
                        if m.group(1).casefold() not in excluded_objects]
         for kind, value, start, end in candidates:

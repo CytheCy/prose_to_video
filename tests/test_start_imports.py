@@ -63,6 +63,13 @@ assert window.story_parts.item(1).checkState() == Qt.Checked
 assert [window.selected_story_parts.item(i).text() for i in range(2)] == [
     window.story_parts.item(i).text() for i in range(2)]
 app.processEvents()
+assert not window.source_view._source_text
+chapters = window.session.root / 'output/chapters'
+chapters.mkdir(parents=True)
+(chapters / 'Chapter One.md').write_text('The traveler arrived.\n\n')
+(chapters / 'Chapter Two.md').write_text('The traveler left.')
+window.refresh()
+app.processEvents()
 assert window.source_view.toPlainText() == 'The traveler arrived.\n\n\n\nThe traveler left.'
 assert window.prose.toPlainText() == prose.read_text()
 window.story_parts.item(1).setCheckState(Qt.Unchecked)

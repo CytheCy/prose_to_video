@@ -13,8 +13,8 @@ def test_prose_excludes_editorial_and_code(tmp_path):
     p = tmp_path / "prose.md"
     p.write_text("# Change\nFix this.\n# 01 One\nHello.\n```\n# not a heading\n```\n## 02 Two\nWorld.\n# Empty\n")
     s = parse_prose(str(p))
-    assert [x.title for x in s] == ["Change", "01 One", "02 Two", "Empty"]
-    assert [x.included for x in s] == [False, True, True, False]
+    assert [x.title for x in s] == ["Change", "01 One", "not a heading", "02 Two", "Empty"]
+    assert [x.included for x in s] == [False, True, False, True, False]
     assert s[1].text == "Hello."
 
 
@@ -79,7 +79,7 @@ def test_overlap_rejected():
 
 def test_names_are_safe_and_unique():
     names = export_names([Section("01 Bad/name", ""), Section("01 Bad/name", ""), Section("No number", "")], "mp3")
-    assert names == ["01 Bad_name.mp3", "01 Bad_name (2).mp3", "03 No number.mp3"]
+    assert names == ["01 Bad_name.mp3", "01 Bad_name (2).mp3", "No number.mp3"]
 
 
 def test_project_roundtrip(tmp_path):

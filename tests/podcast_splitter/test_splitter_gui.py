@@ -1,5 +1,6 @@
 """Behavioral GUI checks, including the asynchronous worker protocol."""
 import os
+import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
@@ -154,6 +155,45 @@ def test_widening_updates_all_parts_and_resets_without_drift(tmp_path):
         w.end.setValue(5.75)
         assert w.project.cut_points(w.project.sections[0]) == (0, 5.75)
         assert w.project.sections[0].end == 5.25
+    finally:
+        w.dirty = False
+        w.close()
+
+
+def test_export_confirmation_for_existing_files(tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    app = QApplication.instance() or QApplication([])
+    w = Window()
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"source")
+    output = tmp_path / "out"
+    output.mkdir()
+    w.project = Project(audio=str(source), output=str(output), duration=2,
+                        sections=[Section("Test", "Prose", start=0, end=1, reviewed=True)])
+    w.format.setCurrentText("WAV")
+    calls = []
+    w.start_worker = lambda action, args: calls.append((action, args))
+    try:
+        # A fresh export needs no confirmation or overwrite flag.
+        monkeypatch.setattr(QMessageBox, "exec", lambda dialog: pytest.fail("Unexpected confirmation"))
+        w.export()
+        assert calls.pop() == ("export", ["--format", "wav"])
+        for suffix in ("md", "wav"):
+            existing = output / f"Test.{suffix}"
+            existing.write_bytes(b"existing")
+            def cancel(dialog):
+                dialog.button(QMessageBox.StandardButton.Cancel).click()
+            monkeypatch.setattr(QMessageBox, "exec", cancel)
+            w.export()
+            assert not calls
+            assert existing.read_bytes() == b"existing"
+            def replace(dialog):
+                assert str(existing) in dialog.detailedText()
+                next(button for button in dialog.buttons() if button.text() == "Replace existing").click()
+            monkeypatch.setattr(QMessageBox, "exec", replace)
+            w.export()
+            assert calls.pop() == ("export", ["--format", "wav", "--overwrite"])
+            existing.unlink()
     finally:
         w.dirty = False
         w.close()

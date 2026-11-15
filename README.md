@@ -45,7 +45,8 @@ can be opened with **File → Open Project**. The splitter and video workflow us
 in the project's `source/` folder; importing or replacing a source on Start
 updates the splitter. Podcast Splitter uses the sources imported on Start automatically,
 without separate file pickers. Splitter Markdown supports `.md`, `.markdown`, and `.txt` with
-ATX headings; prose without headings remains usable by the video workflow.
+hash-prefixed headings. Exported Markdown contains prose only; filenames use the heading
+text (with unsafe filename characters replaced and duplicate names disambiguated).
 
 The original splitter interface and engine are included in `src/podcast_splitter/`
 under their MIT license. Select headings, choose a local speech model, analyze,
@@ -69,7 +70,12 @@ Cancel a running audio task before saving, switching projects, or closing.
    Imports preserve the original files. Re-import the active prose file after editing it to reload its changed text; other duplicate source filenames are rejected.
    Narration audio for Analyze comes from the **Podcast Splitter** exports.
 
-2. **Analyze Story** first reads the whole story in bounded requests to establish
+2. **Analyze Story** reads only the parts checked on **Start**, using their matching
+   `.md` exports in the project’s `output/chapters/` folder. Export these parts in
+   **Podcast Splitter** first; missing or stale chapter files stop analysis. The imported
+   source supplies part boundaries and offset validation, never analysis prose.
+   Headings divide and name parts; they are omitted from scenes and excluded-material rows.
+   Analysis reads selected chapter prose in bounded requests to establish
    character/place identities, then plans visual beats using validated sentence IDs,
    and writes staging, a camera movement, and a self-contained TTI prompt for each scene. It does not
    generate images. Cancel safely; Analyze Story resumes saved checkpoints.

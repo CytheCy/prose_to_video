@@ -72,7 +72,7 @@ def test_widened_export_samples_and_shared_audio(tmp_path):
                 sections=[Section("One", "", start=.5, end=3, reviewed=True),
                           Section("Two", "", start=3, end=5.5, reviewed=True)])
     export(p, "wav")
-    for name, first, last in [("01 One.wav", 1000, 4000), ("02 Two.wav", 3000, 6000)]:
+    for name, first, last in [("One.wav", 1000, 4000), ("Two.wav", 3000, 6000)]:
         with wave.open(str(Path(p.output) / name), "rb") as f:
             data = array.array("h", f.readframes(f.getnframes()))
             assert f.getnframes() / f.getframerate() == 4
@@ -96,7 +96,7 @@ def test_export_matching_markdown(tmp_path, extension):
     assert len(list(output.iterdir())) == 4
     for section, name in zip(p.sections, names):
         assert (output / name).is_file()
-        assert (output / Path(name).with_suffix(".md")).read_text(encoding="utf-8") == f"# {section.title}\n\n{section.text}\n"
+        assert (output / Path(name).with_suffix(".md")).read_text(encoding="utf-8") == f"{section.text}\n"
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
@@ -105,11 +105,46 @@ def test_existing_markdown_prevents_export(tmp_path):
     audio.write_bytes(b"source")
     output = tmp_path / "out"
     output.mkdir()
-    prose = output / "01 Test.md"
+    prose = output / "Test.md"
     prose.write_text("Keep my prose", encoding="utf-8")
     p = Project(audio=str(audio), audio_fingerprint=fingerprint(str(audio)), duration=2,
                 output=str(output), sections=[Section("Test", "New prose", start=0, end=1, reviewed=True)])
-    with pytest.raises(FileExistsError, match="01 Test.md"):
+    with pytest.raises(FileExistsError, match="Test.md"):
         export(p, "wav")
     assert prose.read_text(encoding="utf-8") == "Keep my prose"
     assert list(output.iterdir()) == [prose]
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
+@pytest.mark.parametrize("cancel_publish", [False, True])
+def test_replace_existing_chapter_files(tmp_path, monkeypatch, cancel_publish):
+    import os
+    audio = tmp_path / "source.wav"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=duration=2", str(audio)], check=True)
+    output = tmp_path / "out"
+    output.mkdir()
+    old_audio = output / "Test.wav"
+    old_prose = output / "Test.md"
+    old_audio.write_bytes(b"old audio")
+    old_prose.write_text("old prose")
+    unrelated = output / "Other.md"
+    unrelated.write_text("keep")
+    project = Project(audio=str(audio), audio_fingerprint=fingerprint(str(audio)), duration=2,
+                      output=str(output), sections=[Section("Test", "New prose", start=0, end=1, reviewed=True)])
+    if cancel_publish:
+        original_replace = os.replace
+        def interrupted_replace(src, dst):
+            if Path(src).name == "Test.md" and Path(src).parent.name != "backups":
+                raise KeyboardInterrupt
+            return original_replace(src, dst)
+        monkeypatch.setattr(os, "replace", interrupted_replace)
+        with pytest.raises(KeyboardInterrupt):
+            export(project, "wav", overwrite=True)
+        assert old_audio.read_bytes() == b"old audio"
+        assert old_prose.read_text() == "old prose"
+    else:
+        export(project, "wav", overwrite=True)
+        assert probe(str(old_audio)) == pytest.approx(1, abs=.001)
+        assert old_prose.read_text() == "New prose\n"
+    assert unrelated.read_text() == "keep"
+    assert len(list(output.iterdir())) == 3

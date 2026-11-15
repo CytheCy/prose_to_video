@@ -162,32 +162,20 @@ def detect_scenes(
     sections = sections if sections is not None else parse_manuscript(text)
     heading_ranges = [(s.heading_start, s.heading_end) for s in sections
                       if s.heading_start is not None]
-    offsets = [0]
-    pending_heading = None
-    prose_paragraphs = 0
-    for line in re.finditer(r"[^\r\n]*(?:\r\n|\n|\r|$)", text):
-        if not line.group().strip():
-            continue
-        start = line.start()
-        if any(begin <= start < end for begin, end in heading_ranges):
-            if prose_paragraphs and pending_heading is None:
-                pending_heading = start
-            continue
-        if prose_paragraphs:
-            offsets.append(pending_heading if pending_heading is not None else start)
-        prose_paragraphs += 1
-        pending_heading = None
-    if not prose_paragraphs:
+    from prose_to_video.utils.prose import prose_content_ranges
+    starts = paragraph_starts(text)
+    ranges = [span for a, b in zip(starts, starts[1:] + [len(text)])
+              for span in prose_content_ranges(text, a, b, heading_ranges)]
+    if not ranges:
         raise ValueError("The manuscript has no prose paragraphs to turn into scenes")
     from prose_to_video.pipeline.scene_visuals import earlier_paragraph_contexts
-    ranges = list(zip(offsets, offsets[1:] + [len(text)]))
     contexts = earlier_paragraph_contexts(
         text, ranges, sections, provider, settings, cancel, progress)
     scenes = []
-    for sequence, (start, end) in enumerate(zip(offsets, offsets[1:] + [len(text)]), 1):
+    for sequence, (start, end) in enumerate(ranges, 1):
         if cancel.is_set():
             raise AnalysisCanceled("Scene detection canceled")
-        progress("Describing scenes", sequence, len(offsets))
+        progress("Describing scenes", sequence, len(ranges))
         applicable = [s for s in sections if s.start < end and s.end > start]
         included = any(s.included and s.body_start < end and s.end > start for s in applicable)
         prose = _scene_prose(text, start, end, heading_ranges)
@@ -240,6 +228,8 @@ def merge_with_next(text: str, scenes: list[Scene], identifier: str) -> list[Sce
     if index is None or index + 1 >= len(scenes):
         raise ValueError("Choose a scene with a following scene")
     left, right = scenes[index:index + 2]
+    if text[left.end:right.start].strip():
+        raise ValueError("Scenes separated by a heading cannot be merged")
     merged = left.model_copy(update={"end": right.end, "text": text[left.start:right.end],
                                      "summary": "", "visual_description": "", "render_type": "cinematic", "actions": [], "environment": "",
                                      "visual_atmosphere": "", "boundary_reason": "Manual merge; review description",

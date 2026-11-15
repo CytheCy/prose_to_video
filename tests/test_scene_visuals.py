@@ -49,7 +49,8 @@ def test_broader_context_reaches_scene_and_persists(tmp_path):
     assert all(len(c["source_prose"]) + len(c["previous_notes"]) <= 1000 for c in provider.context_calls)
     assert all(sum(len(c[k]) for k in ("source_prose", "earlier_paragraph_continuity", "visual_reference_notes")) <= 1000
                for c in provider.visual_calls)
-    assert "".join(scene.text for scene in scenes) == text
+    from prose_to_video.utils.prose import without_headings
+    assert "".join(scene.text for scene in scenes) == without_headings(text)
     session = create_project(tmp_path, "Visual scenes")
     session.database.replace_scenes(text, scenes)
     saved = open_project(session.root).database.load_scenes()[1]

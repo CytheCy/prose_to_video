@@ -148,7 +148,7 @@ def analyze(project, model):
     return project
 
 
-def export(project, extension, bitrate="192k"):
+def export(project, extension, bitrate="192k", *, overwrite=False):
     sections = validate_export(project)
     if fingerprint(project.audio) != project.audio_fingerprint:
         raise ValueError("The source audio changed since analysis. Analyze it again.")
@@ -158,8 +158,15 @@ def export(project, extension, bitrate="192k"):
     prose_names = [str(Path(name).with_suffix(".md")) for name in names]
     all_names = [name for pair in zip(names, prose_names) for name in pair]
     for name in all_names:
-        if (output / name).exists():
+        target = output / name
+        if target.exists() and not overwrite:
             raise FileExistsError(f"Already exists: {name}. Choose an empty export folder.")
+        if target.exists() and overwrite:
+            if not target.is_file():
+                raise ValueError(f"Cannot replace a non-file: {name}")
+            for source in (project.audio, project.prose):
+                if source and Path(source).exists() and target.samefile(source):
+                    raise ValueError(f"Cannot replace a source file: {name}")
     # Stage in the destination filesystem. Cancellation leaves no partial chapter files.
     with tempfile.TemporaryDirectory(prefix=".podcast-splitter-", dir=output) as stage:
         for i, (section, name) in enumerate(zip(sections, names)):
@@ -171,17 +178,32 @@ def export(project, extension, bitrate="192k"):
                      "flac": ["-c:a", "flac"], "wav": ["-c:a", "pcm_s16le"]}[extension]
             args += ["-metadata", f"title={section.title}", "-metadata", f"track={i + 1}", str(Path(stage) / name)]
             run(args)
-            prose = f"# {section.title}\n\n{section.text}\n"
+            from prose_to_video.utils.prose import without_headings
+            prose = without_headings(section.text).strip() + "\n"
             (Path(stage) / prose_names[i]).write_text(prose, encoding="utf-8")
         published = []
+        backups = {}
         try:
+            backup_dir = Path(stage) / "backups"
+            backup_dir.mkdir()
             for name in all_names:
-                # link is atomic and refuses to replace a file created during encoding.
-                os.link(Path(stage) / name, output / name)
-                published.append(output / name)
+                target = output / name
+                if overwrite and target.exists():
+                    backup = backup_dir / name
+                    os.link(target, backup)
+                    backups[target] = backup
+                    published.append(target)
+                    os.replace(Path(stage) / name, target)
+                else:
+                    # Refuse to replace files unless the user confirmed replacement.
+                    os.link(Path(stage) / name, target)
+                    published.append(target)
         except BaseException:
-            for path in published:
-                path.unlink(missing_ok=True)
+            for path in reversed(published):
+                if path in backups:
+                    os.replace(backups[path], path)
+                else:
+                    path.unlink(missing_ok=True)
             raise
     progress(100, f"Exported {len(names)} chapters with matching Markdown prose to {output}")
     return names
@@ -198,6 +220,7 @@ def main():
     parser.add_argument("project")
     parser.add_argument("--model", default="base.en", choices=["tiny.en", "base.en", "small.en", "medium.en"])
     parser.add_argument("--format", default="mp3", choices=["mp3", "flac", "wav"])
+    parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     try:
         for tool in ("ffmpeg", "ffprobe"):
@@ -207,7 +230,7 @@ def main():
         if args.action == "analyze":
             analyze(project, args.model).save(args.project)
         else:
-            export(project, args.format)
+            export(project, args.format, overwrite=args.overwrite)
         emit("done", project=args.project)
     except KeyboardInterrupt:
         return 130

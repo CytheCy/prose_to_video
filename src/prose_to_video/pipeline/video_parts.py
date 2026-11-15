@@ -1,6 +1,5 @@
 """Part-local production sources and timing, sharing the project's selected images."""
 from dataclasses import dataclass
-import re
 
 from pydantic import Field
 
@@ -34,20 +33,10 @@ def load_video_part(session, state, section, source_text):
     """Match exported content, not mutable export numbering or splitter checkboxes."""
     raw_body = source_text[section.body_start:section.end]
     body = raw_body.strip()
-    normalized_body = body.replace('\r\n', '\n').replace('\r', '\n')
-    heading_line = source_text[section.heading_start:section.heading_end].splitlines()[0] if section.heading_start is not None else ''
-    match = re.match(r'^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$', heading_line.lstrip('\ufeff'))
-    title = match[1] if match else section.heading
-    expected = f'# {title}\n\n{normalized_body}\n'
-    output = session.root / 'output' / 'chapters'
-    pairs = []
-    for prose in sorted(output.glob('*.md')):
-        if read_prose(prose) != expected:
-            continue
-        for extension in ('.mp3', '.wav', '.flac'):
-            audio = prose.with_suffix(extension)
-            if audio.is_file():
-                pairs.append((prose, audio))
+    from prose_to_video.pipeline.chapter_sources import chapter_source
+    prose, split_text = chapter_source(session, section, source_text)
+    pairs = [(prose, prose.with_suffix(ext)) for ext in ('.mp3', '.wav', '.flac')
+             if prose.with_suffix(ext).is_file()]
     if len(pairs) != 1:
         raise ValueError('Export this part’s matching prose and audio in Podcast Splitter first.'
                          if not pairs else 'More than one split audio matches this part. Keep one export pair in output/chapters.')
@@ -57,7 +46,11 @@ def load_video_part(session, state, section, source_text):
         raise ValueError('The split audio has no usable duration.')
     split_text = read_prose(prose)
     original_start = section.body_start + len(raw_body) - len(raw_body.lstrip())
-    split_start = len(f'# {title}\n\n')
+    from prose_to_video.utils.prose import without_headings
+    clean = without_headings(split_text)
+    if clean != split_text:
+        raise ValueError('Re-export this part in Podcast Splitter to remove headings from its Markdown file.')
+    split_start = len(split_text) - len(split_text.lstrip())
     if state.prose_hash and state.prose_hash != source_hash(source_text):
         raise ValueError('Prose changed. Analyze the selected parts again before producing video.')
     scenes = []
@@ -66,7 +59,7 @@ def load_video_part(session, state, section, source_text):
             continue
         start, end = max(scene.start, original_start), min(scene.end, original_start + len(body))
         # Whitespace at a chapter boundary is harmless; story crossing it is not.
-        if source_text[scene.start:start].strip() or source_text[end:scene.end].strip():
+        if without_headings(source_text[scene.start:start]).strip() or without_headings(source_text[end:scene.end]).strip():
             raise ValueError('A scene crosses this part’s boundary. Split the scene in Scenes first.')
         a = split_start + len(source_text[original_start:start].replace('\r\n', '\n').replace('\r', '\n'))
         b = split_start + len(source_text[original_start:end].replace('\r\n', '\n').replace('\r', '\n'))

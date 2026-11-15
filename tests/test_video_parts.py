@@ -70,7 +70,7 @@ assert window._video_part_id == parts[0].identifier, window.video_sources.text()
 assert window.production_session.project.audio_path == 'output/chapters/01 First.wav'
 assert window.audio._loaded_path == session.root / 'output/chapters/01 First.wav'
 assert abs(window.production_session.project.audio_duration - 2) < .01
-assert window.video_prose._source_text == '# 01 First\n\nFirst words. More words.\n'
+assert window.video_prose._source_text == 'First words. More words.\n'
 assert [s.identifier for s in window.production_state.scenes] == [s.identifier for s in scenes[:2]]
 for scene in window.production_state.scenes:
     assert window.video_prose._source_text[scene.start:scene.end] == scene.text

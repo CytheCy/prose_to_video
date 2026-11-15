@@ -14,7 +14,15 @@ from prose_to_video.storage.project_files import create_project, import_prose
 def session_with_text(tmp_path, text):
     session = create_project(tmp_path, 'story')
     path = tmp_path/'input.txt'; path.write_bytes(text.encode())
-    return import_prose(session,path)
+    session = import_prose(session,path)
+    from prose_to_video.pipeline.manuscript import parse_manuscript
+    output = session.root / 'output' / 'chapters'
+    output.mkdir(parents=True)
+    for i, section in enumerate(parse_manuscript(text)):
+        body = text[section.body_start:section.end].strip()
+        if body:
+            (output / ((text[section.heading_start:section.heading_end].splitlines()[0].lstrip('# ').strip() if section.heading_start is not None else 'Opening prose') + '.md')).write_text(body.replace('\r\n', '\n').replace('\r', '\n') + '\n')
+    return session
 
 
 class FakeAI:
@@ -173,6 +181,7 @@ def test_changed_prose_rebuilds_analysis_and_prompts_keeps_references(tmp_path):
     source = tmp_path / 'input.txt'
     source.write_text(new_text, encoding='utf-8')
     session = import_prose(session, source)
+    (session.root / 'output/chapters/Opening prose.md').write_text(source.read_text())
 
     class RevisedAI(FakeAI):
         def _request(self, instructions, content, schema):
@@ -220,6 +229,7 @@ def test_changed_prose_failed_analysis_resumes_without_losing_references(tmp_pat
     source = tmp_path / 'input.txt'
     source.write_text('Mira leaves.', encoding='utf-8')
     session = import_prose(session, source)
+    (session.root / 'output/chapters/Opening prose.md').write_text(source.read_text())
     class FailingAI(FakeAI):
         def _request(self, instructions, content, schema):
             if schema is Beats:
@@ -800,7 +810,8 @@ def test_prompt_regeneration_omits_attached_headings(tmp_path):
     assert schema is Staging
     assert content['prose'] == 'Mira waits.'
     assert content['scene']['text'] == 'Mira waits.'
-    assert scene.text == text
+    assert '#' not in scene.text
+    assert 'Mira waits.' in scene.text
 
 
 @pytest.mark.parametrize('treatment', [

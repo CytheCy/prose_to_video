@@ -11,6 +11,8 @@ import math
 import re
 import unicodedata
 
+from prose_to_video.utils.prose import HASH_HEADING
+
 
 @dataclass
 class Section:
@@ -94,6 +96,11 @@ def parse_prose(path: str) -> list[Section]:
             editorial = bool(re.match(r"^(change[s]?|notes?|todo|editing notes)\b", title, re.I))
             sections.append(Section(title, body, bool(body) and not editorial))
     for line in text.splitlines():
+        heading = HASH_HEADING.match(line)
+        if heading:
+            finish()
+            title, lines = heading[2].strip(), []
+            continue
         marker = re.match(r"^\s*(`{3,}|~{3,})", line)
         if marker:
             if not fenced:
@@ -103,11 +110,7 @@ def parse_prose(path: str) -> list[Section]:
             continue
         if fenced:
             continue
-        heading = re.match(r"^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$", line)
-        if heading:
-            finish()
-            title, lines = heading[1].strip(), []
-        elif title is not None:
+        if title is not None:
             lines.append(line)
     finish()
     if not sections:
@@ -243,8 +246,6 @@ def export_names(sections: list[Section], extension: str) -> list[str]:
     result, used = [], set()
     for i, s in enumerate(sections, 1):
         name = safe_filename(s.title)
-        if not re.match(r"^\d+\b", name):
-            name = f"{i:02d} {name}"
         base, suffix = name, 2
         while name.casefold() in used:
             name = f"{base} ({suffix})"

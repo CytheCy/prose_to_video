@@ -37,7 +37,7 @@ window.source_imported(import_prose(window.session, prose), 'prose')
 window.source_imported(import_audio(window.session, audio), 'audio')
 assert window.session.project.prose_path == 'source/story.md'
 assert panel.project.audio == str(window.session.root / 'source/narration.wav')
-assert 'first chapter' in window.source_view._source_text
+assert not window.source_view._source_text  # No export: never display the source as analysis prose.
 panel.project.duration = 10
 panel.project.waveform = [.1, .2, .3]
 section = panel.project.sections[0]
@@ -92,7 +92,7 @@ while panel.process and time.monotonic() < deadline:
     time.sleep(.01)
 assert panel.process is None, 'Audio worker did not finish'
 assert not errors, errors
-exported = moved / 'output/chapters/01 One.wav'
+exported = moved / 'output/chapters/One.wav'
 assert exported.is_file()
 assert not (root / 'external-exports').exists()
 assert exported.with_suffix('.md').is_file()

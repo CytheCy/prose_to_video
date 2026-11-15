@@ -105,9 +105,9 @@ def test_each_paragraph_within_heading_section_has_own_scene() -> None:
     text = "# Part One\nFirst paragraph.\nSecond paragraph.\n# Part Two\nThird paragraph.\n"
     scenes = detect_scenes(text, MockProvider(), AISettings())
     assert [scene.text for scene in scenes] == [
-        "# Part One\nFirst paragraph.\n",
+        "First paragraph.\n",
         "Second paragraph.\n",
-        "# Part Two\nThird paragraph.\n",
+        "Third paragraph.\n",
     ]
     assert all(scene.production_included for scene in scenes)
     validate_partition(text, scenes)
@@ -130,13 +130,13 @@ def test_heading_text_is_not_used_to_describe_or_classify_scene() -> None:
     scenes = detect_scenes(text, provider, AISettings())
     assert provider.passages == ["Ada walks into the garden.", "She waters the flowers."]
     assert [scene.viewpoint_category for scene in scenes] == ["direct", "direct"]
-    assert scenes[0].text.startswith("# Radio plays in cafe\n")
+    assert scenes[0].text == "Ada walks into the garden.\n"
 
 
 def test_heading_only_section_does_not_create_a_scene() -> None:
     text = "First.\n# Empty\n# Next\nSecond.\n"
     scenes = detect_scenes(text, MockProvider(), AISettings())
-    assert [scene.text for scene in scenes] == ["First.\n", "# Empty\n# Next\nSecond.\n"]
+    assert [scene.text for scene in scenes] == ["First.\n", "Second.\n"]
     assert scenes_match_inclusion(scenes, parse_manuscript(text))
     with pytest.raises(ValueError, match="no prose paragraphs"):
         detect_scenes("# Heading only\n", MockProvider(), AISettings())
@@ -308,7 +308,7 @@ def test_preceding_context_is_bounded_section_local_and_not_source():
     assert provider.received[1] == ('She sits.', 'Ada arrives.')
     assert provider.received[2] == ('She leaves.', '')
     assert scenes[1].characters == ['Ada']
-    assert ''.join(s.text for s in scenes) == text
+    assert ''.join(s.text for s in scenes) == 'Ada arrives.\nShe sits.\nShe leaves.\n'
     long_text = 'Ada waits.\n' + 'She thinks. ' * 300
     provider = ContextProvider()
     detect_scenes(long_text, provider, AISettings(chunk_chars=1000, overlap_chars=200))

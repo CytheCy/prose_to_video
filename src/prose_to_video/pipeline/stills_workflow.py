@@ -458,32 +458,24 @@ def dependency(state, scene):
 
 
 def prose_ranges(text, ranges, heading_ranges):
-    """Attach heading-only spans to adjacent prose, retaining exact source coverage.
-
-    Return original indices so saved scene edits and image links keep their IDs.
-    """
-    result = []
-    start = ranges[0][0] if ranges else 0
-    for index, (lo, hi) in enumerate(ranges):
-        if _scene_prose(text, lo, hi, heading_ranges):
-            result.append((index, start, hi))
-            start = hi
-    if result:
-        index, lo, _ = result[-1]
-        result[-1] = (index, lo, ranges[-1][1])
-    return result
+    """Remove headings instead of attaching them to neighboring scenes."""
+    from prose_to_video.utils.prose import prose_content_ranges
+    return [(index, a, b) for index, (lo, hi) in enumerate(ranges)
+            for a, b in prose_content_ranges(text, lo, hi, heading_ranges)]
 
 
 def analyze(session, state, provider, settings, cancel=None, progress=lambda *_: None):
     cancel = cancel or Event()
-    progress('Reading imported prose and checking whether the story has changed')
+    progress('Reading selected chapter exports and checking whether the story has changed')
     text = read_prose(session.project.resolved_prose(session.root))
     digest = source_hash(text)
     if not text.strip(): raise ValueError('Import nonempty prose first')
     from prose_to_video.storage.manuscript import ManuscriptStore
     from prose_to_video.pipeline.manuscript import inclusion_fingerprint
     sections = ManuscriptStore(session.database).sections(text)
-    inclusion = inclusion_fingerprint(sections)
+    inclusion = source_hash("chapter-sources-v1" + inclusion_fingerprint(sections))
+    from prose_to_video.pipeline.chapter_sources import analysis_source
+    analysis_text = analysis_source(session, sections, text)
     heading_ranges = [(s.heading_start, s.heading_end) for s in sections
                       if s.heading_start is not None]
     if not _scene_prose(text, 0, len(text), heading_ranges):
@@ -512,6 +504,11 @@ def analyze(session, state, provider, settings, cancel=None, progress=lambda *_:
         state.save(session.root)
         progress('Prose changed; rebuilding analysis and prompts, preserving reference images')
     if state.analysis_inclusion != inclusion:
+        # A fresh catalog must not carry descriptions or context from unchecked parts.
+        references = {c.identifier: c for c in [*state.reference_identities, *state.catalogs] if c.references}
+        state.reference_identities = list(references.values())
+        state.catalogs = []
+        state.checkpoints = {}
         # Reuse completed work wherever the new choices still allow the same
         # scene boundary. Newly included placeholder scenes need staging.
         try:
@@ -519,10 +516,14 @@ def analyze(session, state, provider, settings, cancel=None, progress=lambda *_:
         except ValueError:
             pass
         else:
+            ranges = prose_ranges(text, [(s.start, s.end) for s in state.scenes], heading_ranges)
+            from collections import Counter
+            counts = Counter(index for index, _, _ in ranges)
+            # A legacy scene spanning multiple parts needs new, part-local staging.
             state.scenes = [state.scenes[index].model_copy(update={
                 'start': start, 'end': end, 'text': text[start:end], 'sequence': number})
-                for number, (index, start, end) in enumerate(prose_ranges(
-                    text, [(s.start, s.end) for s in state.scenes], heading_ranges), 1)]
+                for number, (index, start, end) in enumerate(
+                    (span for span in ranges if counts[span[0]] == 1), 1)]
         retained = []
         for scene in state.scenes:
             choices = {s.included for s in sections
@@ -543,21 +544,24 @@ def analyze(session, state, provider, settings, cancel=None, progress=lambda *_:
         state.analysis_inclusion = inclusion
         state.save(session.root)
     spans = units(text, max(200, settings.chunk_chars // 2))
+    catalog_spans = [(a, b) for a, b in spans if analysis_text[a:b].strip()]
     batches, batch, size = [], [], 0
-    for index, (start, end) in enumerate(spans, 1):
+    for index, (start, end) in enumerate(catalog_spans, 1):
         if batch and size + end-start > settings.chunk_chars:
             batches.append(batch); batch, size = [], 0
-        batch.append({'id': index, 'text': text[start:end]}); size += end-start
+        batch.append({'id': index, 'text': analysis_text[start:end]}); size += end-start
     if batch: batches.append(batch)
     def check():
         if cancel.is_set(): raise ValueError('Canceled; completed work saved. Analyze Story resumes it.')
+        if analysis_source(session, sections, text) != analysis_text:
+            raise ValueError('Selected chapter exports changed during analysis; retry analysis')
         if source_hash(read_prose(session.project.resolved_prose(session.root))) != digest:
             raise ValueError('Prose changed during analysis; completed work retained')
     def request(key, instructions, content, schema, description):
         check()
         # Identity checkpoints are independent of catalog additions. Beat
         # checkpoints also track passages, which can change as parts are added.
-        cache_content = {} if key.startswith('catalog-') else content
+        cache_content = {'passages': content['passages'], 'inclusion': inclusion} if key.startswith('catalog-') else content
         cache_inputs = [digest, key, instructions, cache_content]
         if key.startswith('beats-'):
             cache_inputs.append(inclusion)
@@ -568,6 +572,8 @@ def analyze(session, state, provider, settings, cancel=None, progress=lambda *_:
         progress(description + f' · Waiting for {settings.model} to respond')
         result = schema.model_validate(provider._request(instructions, json.dumps(content), schema))
         progress(description + ' · Checking the response and saving progress')
+        if analysis_source(session, sections, text) != analysis_text:
+            raise ValueError('Selected chapter exports changed during analysis; retry analysis')
         if source_hash(read_prose(session.project.resolved_prose(session.root))) != digest:
             raise ValueError('Prose changed during request; prior work retained')
         state.checkpoints[cache_key] = result.model_dump(); state.save(session.root)
@@ -659,6 +665,10 @@ Do not invent events or relationships. Use existing IDs for existing identities.
                         'text': text[start:end], 'sequence': len(retained) + 1})
                     scene.prompt_dependency = dependency(state, scene)
                 retained.append(scene)
+            if len({s.identifier for s in retained}) != len(retained):
+                state.scenes = []
+                state.analysis_plan = []
+                raise ValueError('Legacy scene crosses part headings; rebuilding scene boundaries')
             removed = {s.identifier for s in state.scenes} - {s.identifier for s in retained}
             state.scenes = retained
             state.selected = {k: v for k, v in state.selected.items() if k not in removed}
@@ -702,7 +712,7 @@ Do not invent events or relationships. Use existing IDs for existing identities.
                 'image cannot clearly communicate both. Keep continuous action together otherwise. '
                 'Cover every supplied ID once, in order, with contiguous inclusive first_id/last_id. '
                 f'Image density: {state.density}. Low favors fewer images; High favors more.',
-                {'passages': [{'id': i, 'text': text[a:b]} for i,(a,b) in enumerate(block,1)]}, Beats, description)
+                {'passages': [{'id': i, 'text': analysis_text[a:b]} for i,(a,b) in enumerate(block,1)]}, Beats, description)
             pos = 1
             for beat in result.beats:
                 if beat.first_id != pos or beat.last_id < pos or beat.last_id > len(block):
@@ -726,8 +736,8 @@ Do not invent events or relationships. Use existing IDs for existing identities.
             'Developing staging, composition, camera, lighting and the final image prompt')
         progress(description if included else f'Scene {sequence}/{len(planned)} · Preserving excluded prose without an image prompt')
         if included:
-            content = {'prose': _scene_prose(text, start, end, heading_ranges),
-                'earlier_context': _scene_prose(text, max(0,start-settings.overlap_chars), start, heading_ranges),
+            content = {'prose': _scene_prose(analysis_text, start, end, heading_ranges),
+                'earlier_context': _scene_prose(analysis_text, max(0,start-settings.overlap_chars), start, heading_ranges),
                 'catalog': [c.model_dump() for c in state.catalogs], 'style': state.style,
                 'world_prompt': state.world_prompt,
                 'aspect_ratio': f'{state.image_settings.width}:{state.image_settings.height}'}

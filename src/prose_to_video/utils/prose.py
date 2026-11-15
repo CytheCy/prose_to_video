@@ -36,3 +36,30 @@ def read_prose(path: Path) -> str:
             return stream.read()
     except UnicodeDecodeError as exc:
         raise ValueError("Prose must be UTF-8 text; this file could not be decoded") from exc
+
+
+# Any hash-prefixed line is structural, including nonstandard Markdown headings.
+HASH_HEADING = re.compile(r"^[ \t]*(?P<marks>#+)[ \t]*(?P<title>.*?)[ \t]*#*[ \t]*$")
+
+
+def heading_title(line: str) -> str | None:
+    match = HASH_HEADING.match(line.lstrip('\ufeff').rstrip('\r\n'))
+    return match['title'].strip() if match else None
+
+
+def without_headings(text: str) -> str:
+    return ''.join(line for line in text.splitlines(keepends=True)
+                   if heading_title(line) is None)
+
+
+def prose_content_ranges(text, start, end, headings):
+    """Subtract structural headings, preserving exact source offsets."""
+    position = start
+    for a, b in sorted(headings):
+        if b <= position or a >= end:
+            continue
+        if text[position:a].strip():
+            yield position, a
+        position = min(end, b)
+    if text[position:end].strip():
+        yield position, end

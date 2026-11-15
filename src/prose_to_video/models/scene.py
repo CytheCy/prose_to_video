@@ -1,4 +1,4 @@
-"""Narrative scene records and exact-source partition validation."""
+"""Narrative scene records with exact offsets and heading-free prose coverage."""
 
 from __future__ import annotations
 
@@ -81,14 +81,20 @@ def source_hash(text: str) -> str:
 def validate_partition(text: str, scenes: list[Scene]) -> None:
     if not text or not scenes:
         raise ValueError("A nonempty manuscript requires at least one scene")
+    from prose_to_video.pipeline.manuscript import parse_manuscript
+    from prose_to_video.utils.prose import prose_content_ranges
+    headings = [(s.heading_start, s.heading_end) for s in parse_manuscript(text)
+                if s.heading_start is not None]
+    def has_prose(a, b):
+        return bool(list(prose_content_ranges(text, a, b, headings)))
     position = 0
     identifiers: set[str] = set()
     for number, scene in enumerate(scenes, 1):
-        if scene.sequence != number or scene.start != position or scene.end > len(text):
+        if scene.sequence != number or (scene.start < position or has_prose(position, scene.start)) or scene.end > len(text):
             raise ValueError(f"Scene {number} has a gap, overlap, or invalid order")
         if scene.identifier in identifiers or scene.text != text[scene.start:scene.end]:
             raise ValueError(f"Scene {number} does not match the source text")
         identifiers.add(scene.identifier)
         position = scene.end
-    if position != len(text):
+    if has_prose(position, len(text)):
         raise ValueError("Scene analysis does not cover the complete manuscript")

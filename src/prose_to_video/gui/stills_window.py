@@ -9,7 +9,7 @@ from PySide6.QtCore import QThread, Signal, Slot, Qt, QUrl, QSignalBlocker, QSet
 from PySide6.QtGui import QPixmap, QDesktopServices, QAction, QKeySequence, QPainter
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QPlainTextEdit, QListWidget, QListWidgetItem, QFormLayout, QScrollArea, QSplitter,
-    QFileDialog, QInputDialog, QMessageBox, QDialog, QDialogButtonBox, QComboBox, QTableWidget, QTableWidgetItem, QLineEdit, QDoubleSpinBox)
+    QFileDialog, QInputDialog, QMessageBox, QDialog, QDialogButtonBox, QComboBox, QTableWidget, QTableWidgetItem, QLineEdit, QDoubleSpinBox, QLayout, QFrame)
 from prose_to_video.pipeline.stills_workflow import (Workflow, Identity, Interval, load_workflow,
     analyze, dependency, regenerate_prompt, generate_still, store_still, assemble_timeline,
     validate_timeline, render_plan, listed_identities, generate_character_reference, set_world_prompt,
@@ -69,7 +69,7 @@ class Task(QThread):
 
 class MainWindow(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle('Prose to Video'); self.resize(1350, 950)
+        super().__init__(); self.setWindowTitle('Prose to Video')
         self.session = None; self.state = Workflow(); self.worker = None
         self._video_session = None
         self._video_state = None
@@ -259,6 +259,24 @@ class MainWindow(QMainWindow):
         scene_scroll.setWidget(self.video_scene_cards); scene_scroll.setMinimumHeight(160); scene_scroll.setMaximumHeight(280)
         self.video.layout().addWidget(scene_scroll)
         self.video_message = QLabel(); self.video_message.setWordWrap(True); self.video.layout().addWidget(self.video_message)
+        # Keep each tab's controls inside a scrollable viewport instead of letting
+        # the tallest page force the entire window beyond the desktop's height.
+        # Retain the tab widgets themselves for navigation and enable/disable logic.
+        for page in (self.start_page, self.start, self.place, self.character,
+                     self.scenes_page, self.stills_page, self.video):
+            content = QWidget()
+            content.setLayout(page.layout())
+            content.layout().setSizeConstraint(QLayout.SetMinAndMaxSize)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setWidget(content)
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(scroll)
+        available = self.screen().availableGeometry()
+        self.resize(min(1350, available.width() - 40),
+                    min(950, available.height() - 70))
         file_menu = self.menuBar().addMenu('File')
         new_project_action = file_menu.addAction('New Project', self.new_project)
         new_project_action.setShortcuts(QKeySequence.keyBindings(QKeySequence.New))
@@ -586,12 +604,19 @@ class MainWindow(QMainWindow):
         self.selected_story_parts.setVisible(bool(count))
         self.refresh_video_parts(selected)
         selected_ids = {item.data(Qt.UserRole) for item in selected}
-        selected_prose = '\n\n'.join(
-            self._parts_text[section.body_start:section.end]
-            for section in self._parts_sections if section.identifier in selected_ids)
+        from prose_to_video.pipeline.chapter_sources import chapter_source
+        from prose_to_video.utils.prose import without_headings
+        try:
+            selected_prose = '\n\n'.join(
+                without_headings(chapter_source(self.session, section, self._parts_text)[1])
+                for section in self._parts_sections if section.identifier in selected_ids
+                and self._parts_text[section.body_start:section.end].strip())
+        except ValueError as exc:
+            selected_prose = ''
+            self.source_view.clear_story(str(exc))
         if selected_prose:
             self.source_view.show_text(selected_prose)
-        else:
+        elif not selected_ids:
             self.source_view.clear_story('Choose prose parts on Start to analyze them here.')
         self.parts_help.setText(
             f'{count} of {self.story_parts.count()} parts checked. Choices save automatically. '
@@ -1260,6 +1285,7 @@ class MainWindow(QMainWindow):
             i=self.state.scenes.index(s)
             if i+1>=len(self.state.scenes):return
             a,b=self.state.scenes[i:i+2]
+            if a.end != b.start:raise ValueError('Cannot merge scenes across a part heading')
             if a.production_included!=b.production_included:raise ValueError('Cannot merge across manuscript exclusions')
             if any(t.scene_id in {a.identifier,b.identifier} for t in self.state.timeline):raise ValueError('Timeline placements preserved; merge requires a project without these placements')
             data=a.model_dump(); data.update(end=b.end,text=a.text+b.text,final_prompt='',prompt_dependency='',identity_links=list(set(a.identity_links+b.identity_links)))

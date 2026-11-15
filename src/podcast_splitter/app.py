@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QLayout,
 )
 
-from .core import Project, parse_prose, validate_export, fingerprint
+from .core import Project, parse_prose, validate_export, fingerprint, export_names
 
 
 def clock(seconds):
@@ -716,16 +716,37 @@ class Window(QMainWindow):
         self.start_worker("analyze", ["--model", self.project.model])
 
     def export(self):
+        extension = self.format.currentText().lower()
+        args = ["--format", extension]
         try:
-            validate_export(self.project)
+            sections = validate_export(self.project)
             if not self.project.output:
                 raise ValueError("Choose an export folder first.")
             if not Path(self.project.audio).is_file():
                 raise ValueError("Source audio is missing.")
+            names = export_names(sections, extension)
+            targets = [path for name in names for path in
+                       (Path(self.project.output) / name, Path(self.project.output) / Path(name).with_suffix(".md"))]
+            existing = [path for path in targets if path.exists()]
+            if existing:
+                dialog = QMessageBox(self)
+                dialog.setWindowTitle("Replace existing chapter files?")
+                dialog.setIcon(QMessageBox.Icon.Warning)
+                dialog.setText("Markdown or audio files for these chapters already exist.")
+                dialog.setInformativeText("Replace existing files and export the selected chapters?")
+                dialog.setDetailedText("\n".join(str(path) for path in existing))
+                replace = dialog.addButton("Replace existing", QMessageBox.ButtonRole.AcceptRole)
+                cancel = dialog.addButton(QMessageBox.StandardButton.Cancel)
+                dialog.setDefaultButton(cancel)
+                dialog.setEscapeButton(cancel)
+                dialog.exec()
+                if dialog.clickedButton() is not replace:
+                    return
+                args.append("--overwrite")
         except Exception as e:
             self.error(e)
             return
-        self.start_worker("export", ["--format", self.format.currentText().lower()])
+        self.start_worker("export", args)
 
     def busy(self, active):
         for widget in (self.prose_picker, self.audio_picker, self.output_picker, self.model,
