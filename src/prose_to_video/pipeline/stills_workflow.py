@@ -55,6 +55,7 @@ class Identity(Record):
     description: str
     references: list[str] = Field(default_factory=list)  # project-relative assets
     manual: bool = False
+    part_ids: list[str] = Field(default_factory=list)
 
 
 class Still(Record):
@@ -95,6 +96,11 @@ class Workflow(Record):
     analysis_scene_detection: Literal['ai', 'paragraph'] = 'ai'
     image_settings: StillImageSettings = Field(default_factory=StillImageSettings)
     render_settings: RenderSettings = Field(default_factory=RenderSettings)
+    catalog_hash: str = ''
+    selected_part_ids: list[str] = Field(default_factory=list)
+    part_world_prompts: dict[str, str] = Field(default_factory=dict)
+    part_world_hashes: dict[str, str] = Field(default_factory=dict)
+    scene_world_prompts: dict[str, str] = Field(default_factory=dict)
     catalogs: list[Identity] = Field(default_factory=list)
     reference_identities: list[Identity] = Field(default_factory=list)
     scenes: list[Scene] = Field(default_factory=list)
@@ -224,11 +230,11 @@ class WorldPromptResult(Record):
 WORLD_PROMPT_LIMIT = 750
 
 
-def world_building_content(session):
+def world_building_content(session, part_ids=None):
     """Read the project copies, including text embedded in PDF reference files."""
     from prose_to_video.storage.project_files import world_building_files
     content = []
-    for path in world_building_files(session):
+    for path in world_building_files(session, part_ids):
         if path.suffix.casefold() == '.pdf':
             from pypdf import PdfReader
             body = '\n'.join(page.extract_text() or '' for page in PdfReader(str(path)).pages)
@@ -262,21 +268,35 @@ def set_world_prompt(state, prompt):
         raise ValueError(f'World building prompt cannot exceed {WORLD_PROMPT_LIMIT} characters')
     old_prompt = state.world_prompt.strip()
     state.world_prompt = prompt.strip()
+    for part_id in state.selected_part_ids:
+        state.part_world_prompts[part_id] = state.world_prompt
     for scene in state.scenes:
+        if state.selected_part_ids and not scene.production_included:
+            continue
+        previous = state.scene_world_prompts.get(scene.identifier, old_prompt)
+        state.scene_world_prompts[scene.identifier] = state.world_prompt
         specific = (scene.location or '').strip()
-        if old_prompt and specific.startswith(old_prompt):
-            specific = specific[len(old_prompt):].lstrip('\n').strip()
+        if previous and specific.startswith(previous):
+            specific = specific[len(previous):].lstrip('\n').strip()
         scene.location = scene_location(state.world_prompt, specific)
         scene.prompt_dependency = dependency(state, scene)
 
 
 def listed_identities(state, kind=None):
-    """List places and characters participating in at least two distinct scenes.
+    """Filter shared identities to selected parts, keeping recurrence story-wide.
 
-    Keep candidates in the internal catalog for staging, references and resumed
-    analysis. Scene participation, rather than name/paragraph frequency, decides
-    which characters need a persistent design in the Character workspace.
+    Older workflows without part membership use their existing scene links.
     """
+    if state.catalog_hash:
+        selected = set(state.selected_part_ids)
+        return [c for c in state.catalogs if (kind is None or c.kind == kind)
+                and selected.intersection(c.part_ids)
+                and c.name.strip().casefold() not in PRONOUNS
+                and (c.manual or c.kind == 'Place' or len(c.part_ids) > 1 or sum(
+                    c.identifier in scene.identity_links or bool(
+                        {n.casefold() for n in [c.name, *c.aliases]} &
+                        {n.casefold() for n in scene.characters})
+                    for scene in state.scenes) > 1)]
     characters = [c for c in state.catalogs if c.kind == 'Character']
     names = {}
     for character in characters:
@@ -451,10 +471,14 @@ def paragraph_spans(text):
     return spans
 
 
+def scene_world_prompt(state, scene):
+    return state.scene_world_prompts.get(scene.identifier, state.world_prompt)
+
+
 def dependency(state, scene):
     data = scene.model_dump(exclude={'final_prompt', 'negative_prompt', 'prompt_dependency', 'manual_fields'} | CAMERA_RENDER_FIELDS)
     return source_hash(json.dumps([data, state.style, state.image_settings.width, state.image_settings.height,
-        state.world_prompt, [c.model_dump() for c in state.catalogs if c.identifier in scene.identity_links]], sort_keys=True))
+        scene_world_prompt(state, scene), [c.model_dump() for c in state.catalogs if c.identifier in scene.identity_links]], sort_keys=True))
 
 
 def prose_ranges(text, ranges, heading_ranges):
@@ -473,7 +497,8 @@ def analyze(session, state, provider, settings, cancel=None, progress=lambda *_:
     from prose_to_video.storage.manuscript import ManuscriptStore
     from prose_to_video.pipeline.manuscript import inclusion_fingerprint
     sections = ManuscriptStore(session.database).sections(text)
-    inclusion = source_hash("chapter-sources-v1" + inclusion_fingerprint(sections))
+    state.selected_part_ids = [s.identifier for s in sections if s.included]
+    inclusion = source_hash("chapter-sources-v2" + inclusion_fingerprint(sections))
     from prose_to_video.pipeline.chapter_sources import analysis_source
     analysis_text = analysis_source(session, sections, text)
     heading_ranges = [(s.heading_start, s.heading_end) for s in sections
@@ -491,6 +516,10 @@ def analyze(session, state, provider, settings, cancel=None, progress=lambda *_:
             for c in [*state.reference_identities, *state.catalogs] if c.references}
         state.reference_identities = list(references.values())
         state.catalogs = []
+        state.catalog_hash = ''
+        state.part_world_prompts = {}
+        state.part_world_hashes = {}
+        state.scene_world_prompts = {}
         state.scenes = []
         state.stills = []
         state.selected = {}
@@ -504,11 +533,6 @@ def analyze(session, state, provider, settings, cancel=None, progress=lambda *_:
         state.save(session.root)
         progress('Prose changed; rebuilding analysis and prompts, preserving reference images')
     if state.analysis_inclusion != inclusion:
-        # A fresh catalog must not carry descriptions or context from unchecked parts.
-        references = {c.identifier: c for c in [*state.reference_identities, *state.catalogs] if c.references}
-        state.reference_identities = list(references.values())
-        state.catalogs = []
-        state.checkpoints = {}
         # Reuse completed work wherever the new choices still allow the same
         # scene boundary. Newly included placeholder scenes need staging.
         try:
@@ -544,13 +568,21 @@ def analyze(session, state, provider, settings, cancel=None, progress=lambda *_:
         state.analysis_inclusion = inclusion
         state.save(session.root)
     spans = units(text, max(200, settings.chunk_chars // 2))
-    catalog_spans = [(a, b) for a, b in spans if analysis_text[a:b].strip()]
-    batches, batch, size = [], [], 0
-    for index, (start, end) in enumerate(catalog_spans, 1):
-        if batch and size + end-start > settings.chunk_chars:
-            batches.append(batch); batch, size = [], 0
-        batch.append({'id': index, 'text': analysis_text[start:end]}); size += end-start
-    if batch: batches.append(batch)
+    # Catalog all source parts, regardless of the production selection. Keep
+    # batches inside a part so membership is explicit, including pronoun-only appearances.
+    batches = []
+    for section in sections:
+        catalog_text = _scene_prose(text, section.body_start, section.end, heading_ranges)
+        batch, size = [], 0
+        for index, (start, end) in enumerate(units(catalog_text, max(200, settings.chunk_chars // 2)), 1):
+            passage = catalog_text[start:end]
+            if not passage.strip():
+                continue
+            if batch and size + len(passage) > settings.chunk_chars:
+                batches.append((section.identifier, batch)); batch, size = [], 0
+            batch.append({'id': index, 'text': passage}); size += len(passage)
+        if batch:
+            batches.append((section.identifier, batch))
     def check():
         if cancel.is_set(): raise ValueError('Canceled; completed work saved. Analyze Story resumes it.')
         if analysis_source(session, sections, text) != analysis_text:
@@ -561,7 +593,7 @@ def analyze(session, state, provider, settings, cancel=None, progress=lambda *_:
         check()
         # Identity checkpoints are independent of catalog additions. Beat
         # checkpoints also track passages, which can change as parts are added.
-        cache_content = {'passages': content['passages'], 'inclusion': inclusion} if key.startswith('catalog-') else content
+        cache_content = {'passages': content['passages']} if key.startswith('catalog-') else content
         cache_inputs = [digest, key, instructions, cache_content]
         if key.startswith('beats-'):
             cache_inputs.append(inclusion)
@@ -583,52 +615,68 @@ def analyze(session, state, provider, settings, cancel=None, progress=lambda *_:
         invalid = result.model_dump()
         state.checkpoints = {k:v for k,v in state.checkpoints.items() if v != invalid}
         state.save(session.root)
-    files = world_building_content(session)
-    files_hash = source_hash(json.dumps(files, sort_keys=True)) if files else ''
-    if files_hash != state.world_building_hash:
-        if files:
-            instructions = '''Extracting World-Building Details for Text-to-Image Prompt.
-Read every supplied world building file as context for the same story world. Return one compact,
-visual prompt that can be reused across many generated images. Synthesize the overall feel:
-place, era, architecture, materials, palette, light, atmosphere and visual mood where supported.
-Favor recurring or defining traits over isolated mentions. Do not list individual places,
-characters, events, or plot details. Do not invent unsupported specifics.
-Aim for 300–500 characters. The absolute maximum is 750 characters, including spaces.'''
-            for attempt in range(2):
-                result = request(f'world-building-{attempt}', instructions,
-                    {'files': files}, WorldPromptResult, 'Places · Extracting the shared world building prompt')
-                new_prompt = result.prompt.strip()
-                if new_prompt and len(new_prompt) <= WORLD_PROMPT_LIMIT:
-                    break
-                discard_invalid(result)
-                if attempt == 1:
-                    raise ValueError(f'AI did not return a world building prompt within {WORLD_PROMPT_LIMIT} characters; retry analysis')
-                instructions += '\nYour previous response exceeded the limit or was empty. Rewrite it more concisely.'
-        else:
-            new_prompt = ''
-        set_world_prompt(state, new_prompt)
-        state.world_building_hash = files_hash
-        state.save(session.root)
+    for section in sections:
+        if not section.included:
+            continue
+        files = world_building_content(session, [section.identifier])
+        files_hash = source_hash(json.dumps(files, sort_keys=True)) if files else ''
+        if files_hash != state.part_world_hashes.get(section.identifier, ''):
+            if files:
+                instructions = '''Extracting World-Building Details for Text-to-Image Prompt.
+    Read every supplied world building file as context for the same story world. Return one compact,
+    visual prompt that can be reused across many generated images. Synthesize the overall feel:
+    place, era, architecture, materials, palette, light, atmosphere and visual mood where supported.
+    Favor recurring or defining traits over isolated mentions. Do not list individual places,
+    characters, events, or plot details. Do not invent unsupported specifics.
+    Aim for 300–500 characters. The absolute maximum is 750 characters, including spaces.'''
+                for attempt in range(2):
+                    result = request(f'world-building-{attempt}', instructions,
+                        {'files': files}, WorldPromptResult, 'Places · Extracting the shared world building prompt')
+                    new_prompt = result.prompt.strip()
+                    if new_prompt and len(new_prompt) <= WORLD_PROMPT_LIMIT:
+                        break
+                    discard_invalid(result)
+                    if attempt == 1:
+                        raise ValueError(f'AI did not return a world building prompt within {WORLD_PROMPT_LIMIT} characters; retry analysis')
+                    instructions += '\nYour previous response exceeded the limit or was empty. Rewrite it more concisely.'
+            else:
+                new_prompt = ''
+            old_prompt = state.part_world_prompts.get(section.identifier, '')
+            state.part_world_prompts[section.identifier] = new_prompt
+            state.part_world_hashes[section.identifier] = files_hash
+            for scene in state.scenes:
+                if section.body_start <= scene.start < section.end:
+                    specific = (scene.location or '').strip()
+                    if old_prompt and specific.startswith(old_prompt):
+                        specific = specific[len(old_prompt):].strip()
+                    scene.location = scene_location(new_prompt, specific)
+                    state.scene_world_prompts[scene.identifier] = new_prompt
+                    scene.prompt_dependency = dependency(state, scene)
+            state.save(session.root)
+    state.world_prompt = '\n'.join(dict.fromkeys(
+        state.part_world_prompts.get(part_id, '') for part_id in state.selected_part_ids)).strip()
     # Catalog pass reads the entire manuscript before the scene pass.
-    for number, batch in enumerate(batches):
+    for number, (part_id, batch) in enumerate(batches if state.catalog_hash != digest else []):
         description = (f'Characters and places: section {number+1}/{len(batches)} · '
             'Finding names, aliases, appearances and setting details')
         result = request(f'catalog-{number}', '''Identify all participating characters and places, including one-offs and
 unambiguous pronouns. Resolve aliases/context to existing stable IDs; pronouns are never global aliases.
 Return new identities or canonical updates. Preserve physical traits, architecture, layout, materials,
 colors and spatial relationships; age/clothing/condition changes are contextual, not new identities.
-Do not invent events or relationships. Use existing IDs for existing identities. References stay empty.''',
+Do not invent events or relationships. Use existing IDs for existing identities. References stay empty. Return only identities participating in the supplied passages; do not return other known identities.''',
             {'passages': batch, 'known': [c.model_dump() for c in state.catalogs]}, CatalogResult, description)
         for identity in result.identities:
             if identity.kind == 'Character':
                 if identity.name.strip().casefold() in PRONOUNS:
                     continue
                 identity.aliases = [a for a in identity.aliases if a.strip().casefold() not in PRONOUNS]
+            identity.part_ids = [part_id]
             identity.references = []  # Only locally imported, user-selected assets may condition jobs.
             identity.manual = False
             existing = next((c for c in state.catalogs if c.identifier == identity.identifier or
                 set(n.casefold() for n in [c.name, *c.aliases]) & set(n.casefold() for n in [identity.name, *identity.aliases]) and c.kind == identity.kind), None)
             if existing:
+                existing.part_ids = list(dict.fromkeys([*existing.part_ids, part_id]))
                 if not existing.manual: existing.description = identity.description
                 existing.aliases = list(dict.fromkeys(existing.aliases + [a for a in [identity.name, *identity.aliases] if a != existing.name]))
             else:
@@ -643,6 +691,8 @@ Do not invent events or relationships. Use existing IDs for existing identities.
                     state.reference_identities.remove(matches[0])
                 state.catalogs.append(identity)
         state.prose_hash = digest; state.save(session.root)
+    state.catalog_hash = digest
+    state.save(session.root)
     if state.analysis_scene_detection != state.scene_detection:
         check()
         # Keep image records/files, but old scene anchors and timing no longer apply.
@@ -739,7 +789,8 @@ Do not invent events or relationships. Use existing IDs for existing identities.
             content = {'prose': _scene_prose(analysis_text, start, end, heading_ranges),
                 'earlier_context': _scene_prose(analysis_text, max(0,start-settings.overlap_chars), start, heading_ranges),
                 'catalog': [c.model_dump() for c in state.catalogs], 'style': state.style,
-                'world_prompt': state.world_prompt,
+                'world_prompt': next((state.part_world_prompts.get(s.identifier, '') for s in sections
+                                      if s.body_start <= start < s.end), ''),
                 'aspect_ratio': f'{state.image_settings.width}:{state.image_settings.height}'}
             for attempt in range(3):
                 result = request(f'scene-{start}-{end}', ART_DIRECTION + '\n' + IDENTITY_LINKS,
@@ -764,7 +815,10 @@ Do not invent events or relationships. Use existing IDs for existing identities.
         else: data = {'title': 'Excluded manuscript material'}
         scene = Scene(sequence=sequence, start=start, end=end, text=text[start:end],
             source_version=digest, production_included=included, **data)
-        scene.location = scene_location(state.world_prompt, scene.location)
+        prompt = next((state.part_world_prompts.get(s.identifier, '') for s in sections
+                       if s.body_start <= start < s.end), '')
+        state.scene_world_prompts[scene.identifier] = prompt
+        scene.location = scene_location(prompt, scene.location)
         scene.prompt_dependency = dependency(state, scene)
         state.scenes.append(scene); state.scenes.sort(key=lambda s:s.start)
         for i,s in enumerate(state.scenes,1): s.sequence=i
@@ -784,7 +838,7 @@ def regenerate_prompt(session, state, scene, provider):
     scene_data['text'] = prose
     result = Staging.model_validate(provider._request(ART_DIRECTION,
         json.dumps({'prose': prose, 'scene': scene_data, 'style': state.style,
-            'world_prompt': state.world_prompt,
+            'world_prompt': scene_world_prompt(state, scene),
             'catalog': [c.model_dump() for c in state.catalogs if c.identifier in scene.identity_links],
             'aspect_ratio': f'{state.image_settings.width}:{state.image_settings.height}'}), Staging))
     scene.final_prompt = treatment_prompt(result.final_prompt, scene.render_type, scene.explanatory_focus)
@@ -876,8 +930,9 @@ def generate_still(session, state, scene, provider, cancel=None, progress=lambda
     if refs and (not caps.references or len(refs) > caps.max_references):
         raise ValueError(f'{provider.name} supports {caps.max_references} references; selected {len(refs)}. Change reference selection or disable references.')
     prompt, negative = scene.final_prompt, scene.negative_prompt
-    if state.world_prompt and state.world_prompt not in prompt:
-        prompt += '\nWorld: ' + state.world_prompt
+    world = scene_world_prompt(state, scene)
+    if world and world not in prompt:
+        prompt += '\nWorld: ' + world
     if negative and not caps.negative_prompt:
         prompt += '\nAvoid: ' + negative; negative = ''
         progress('Provider adaptation: negative prompt appended as Avoid instructions')

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -181,19 +182,45 @@ def import_audio(session: ProjectSession, source: Path) -> ProjectSession:
     return _import_file(session, source, "audio")
 
 
-def world_building_files(session: ProjectSession) -> list[Path]:
+def selected_world_parts(session):
+    prose = session.project.resolved_prose(session.root)
+    if not prose:
+        return []
+    from prose_to_video.storage.manuscript import ManuscriptStore
+    return [s.identifier for s in ManuscriptStore(session.database).sections(read_prose(prose)) if s.included]
+
+
+def _world_assignments(session):
+    path = session.root / 'world_building' / '.parts.json'
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def _save_world_assignments(session, assignments):
+    directory = session.root / 'world_building'
+    with tempfile.NamedTemporaryFile(mode='w', dir=directory, delete=False) as stream:
+        temporary = Path(stream.name)
+        json.dump(assignments, stream)
+    os.replace(temporary, directory / '.parts.json')
+
+
+def world_building_files(session: ProjectSession, part_ids=None) -> list[Path]:
     directory = session.root / "world_building"
     if not directory.exists():
         return []
     if not directory.is_dir() or not directory.resolve().is_relative_to(session.root.resolve()):
         raise ProjectError("Project world building directory is invalid")
-    return sorted(path for path in directory.iterdir() if path.is_file() and not path.name.startswith("."))
+    selected = set(selected_world_parts(session) if part_ids is None else part_ids)
+    assignments = _world_assignments(session)
+    # Unscoped files from older projects remain available to existing parts.
+    return sorted(path for path in directory.iterdir() if path.is_file() and not path.name.startswith('.')
+                  and (path.name not in assignments or selected.intersection(assignments[path.name])
+                       or not selected and not assignments[path.name]))
 
 
 def import_world_building_files(session: ProjectSession, sources: list[Path]) -> list[Path]:
     existing = world_building_files(session)
     if len(existing) + len(sources) > 3:
-        raise ProjectError("A project can have up to three world building files")
+        raise ProjectError("Selected parts can have up to three world building files")
     names = [source.name for source in sources]
     if len(names) != len(set(names)) or any(name in {path.name for path in existing} for name in names):
         raise ProjectError("A world building file with that name is already in the project")
@@ -201,6 +228,9 @@ def import_world_building_files(session: ProjectSession, sources: list[Path]) ->
         raise ProjectError("A selected world building file does not exist or cannot be read")
     directory = session.root / "world_building"
     directory.mkdir(exist_ok=True)
+    # A single shared folder owns the copies; assignments control their scope.
+    if any((directory / name).exists() for name in names):
+        raise ProjectError('A world building file with that name is already in the project')
     copied = []
     try:
         for source in sources:
@@ -220,6 +250,10 @@ def import_world_building_files(session: ProjectSession, sources: list[Path]) ->
         for destination in copied:
             destination.unlink(missing_ok=True)
         raise ProjectError(f"Could not add world building files: {exc}") from exc
+    assignments = _world_assignments(session)
+    for path in copied:
+        assignments[path.name] = selected_world_parts(session)
+    _save_world_assignments(session, assignments)
     return world_building_files(session)
 
 
@@ -229,7 +263,15 @@ def remove_world_building_file(session: ProjectSession, name: str) -> list[Path]
     if target is None:
         raise ProjectError("The selected world building file is no longer in the project")
     try:
-        target.unlink()
+        assignments = _world_assignments(session)
+        if name in assignments:
+            assignments[name] = [p for p in assignments[name] if p not in selected_world_parts(session)]
+            if not assignments[name]:
+                target.unlink()
+                del assignments[name]
+            _save_world_assignments(session, assignments)
+        else:
+            target.unlink()
     except OSError as exc:
         raise ProjectError(f"Could not delete world building file: {exc}") from exc
     return world_building_files(session)

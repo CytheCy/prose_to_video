@@ -10,7 +10,7 @@ from prose_to_video.pipeline.stills_workflow import (
     Workflow, WorldPromptResult, analyze, load_workflow, world_building_content,
     set_world_prompt, WORLD_PROMPT_LIMIT)
 from prose_to_video.storage.project_files import create_project, import_prose, import_world_building_files
-from test_stills_workflow import FakeAI
+from test_stills_workflow import FakeAI, session_with_text
 
 
 class WorldAI(FakeAI):
@@ -24,9 +24,7 @@ class WorldAI(FakeAI):
 
 
 def test_world_prompt_saved_shown_in_locations_and_updated_with_files(tmp_path):
-    session = create_project(tmp_path, 'story')
-    prose = tmp_path / 'story.txt'; prose.write_text('Mira enters the station.')
-    session = import_prose(session, prose)
+    session = session_with_text(tmp_path, 'Mira enters the station.')
     world = tmp_path / 'world.md'; world.write_text('A rain washed stone city at dusk.')
     import_world_building_files(session, [world])
     state = Workflow(); provider = WorldAI()
@@ -96,9 +94,7 @@ def test_world_prompt_limit_rejects_direct_updates_and_retries_ai(tmp_path):
                 return schema(prompt='x' * 751)
             return super()._request(instructions, content, schema)
 
-    session = create_project(tmp_path, 'story')
-    prose = tmp_path / 'story.txt'; prose.write_text('Mira enters the station.')
-    session = import_prose(session, prose)
+    session = session_with_text(tmp_path, 'Mira enters the station.')
     world = tmp_path / 'world.md'; world.write_text('A rain washed stone city at dusk.')
     import_world_building_files(session, [world])
     state = Workflow(); provider = VerboseAI()

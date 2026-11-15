@@ -23,7 +23,8 @@ assert 'Import Prose' not in [b.text() for b in window.start.findChildren(QPushB
 assert window.story_parts.count() == 0
 assert window.selected_story_parts.count() == 0
 assert 'Choose parts on Start' in window.selected_parts_summary.text()
-assert not window.start_analyze_button.isEnabled()
+assert 'Analyze Checked Parts' not in buttons
+assert not window.analyze_story_button.isEnabled()
 assert not buttons['Deselect All'].isEnabled()
 
 def fill_dialog():
@@ -99,13 +100,13 @@ assert all(window.story_parts.item(i).checkState() == Qt.Unchecked
 assert '0 of 2' in window.parts_help.text()
 assert window.selected_story_parts.count() == 0
 assert 'No story parts selected' in window.selected_parts_summary.text()
-assert not window.start_analyze_button.isEnabled()
+assert not window.analyze_story_button.isEnabled()
 assert not buttons['Deselect All'].isEnabled()
 window.load(window.session)
 assert all(window.story_parts.item(i).checkState() == Qt.Unchecked
            for i in range(window.story_parts.count()))
 window.story_parts.item(0).setCheckState(Qt.Checked)
-assert window.start_analyze_button.isEnabled()
+assert window.analyze_story_button.isEnabled()
 assert buttons['Deselect All'].isEnabled()
 assert window.selected_story_parts.count() == 1
 assert window.selected_story_parts.item(0).text() == window.story_parts.item(0).text()

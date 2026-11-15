@@ -1,4 +1,4 @@
-"""Selected chapter files are the only prose supplied to story analysis."""
+"""Scene analysis uses selected exports; catalogs use the whole source story."""
 import json
 
 import pytest
@@ -13,7 +13,7 @@ from test_stills_workflow import FakeAI, session_with_text
 
 @pytest.mark.parametrize('newline', ['\n', '\r\n', '\r'])
 @pytest.mark.parametrize('mode', ['ai', 'paragraph'])
-def test_only_selected_chapters_reach_every_analysis_pass(tmp_path, newline, mode):
+def test_catalog_reads_whole_story_but_scenes_read_only_selected_exports(tmp_path, newline, mode):
     text = '# First\nMira waits.\n\n# Second\nSECRET unselected prose.\n'.replace('\n', newline)
     session = session_with_text(tmp_path, text)
     store = ManuscriptStore(session.database)
@@ -24,7 +24,9 @@ def test_only_selected_chapters_reach_every_analysis_pass(tmp_path, newline, mod
     state = Workflow(scene_detection=mode)
     provider = FakeAI()
     analyze(session, state, provider, AISettings())
-    payloads = json.dumps([content for _, content in provider.calls])
+    catalogs = json.dumps([content for schema, content in provider.calls if schema.__name__ == 'CatalogResult'])
+    assert 'SECRET' in catalogs
+    payloads = json.dumps([content for schema, content in provider.calls if schema.__name__ != 'CatalogResult'])
     assert 'SECRET' not in payloads
     assert '# First' not in payloads and '# Second' not in payloads
     assert 'Mira waits.' in payloads

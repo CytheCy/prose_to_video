@@ -70,13 +70,15 @@ Cancel a running audio task before saving, switching projects, or closing.
    Imports preserve the original files. Re-import the active prose file after editing it to reload its changed text; other duplicate source filenames are rejected.
    Narration audio for Analyze comes from the **Podcast Splitter** exports.
 
-2. **Analyze Story** reads only the parts checked on **Start**, using their matching
+2. **Analyze Story** builds a shared character/place catalog from the entire source story once,
+   tracking appearances across parts. Switching checked parts reuses that catalog and its
+   reference images. Scene analysis reads only the parts checked on **Start**, using their matching
    `.md` exports in the project’s `output/chapters/` folder. Export these parts in
    **Podcast Splitter** first; missing or stale chapter files stop analysis. The imported
-   source supplies part boundaries and offset validation, never analysis prose.
+   source supplies part boundaries and offset validation for scenes.
    Headings divide and name parts; they are omitted from scenes and excluded-material rows.
-   Analysis reads selected chapter prose in bounded requests to establish
-   character/place identities, then plans visual beats using validated sentence IDs,
+   Catalog analysis reads the complete source in bounded requests. Scene analysis
+   plans visual beats from selected chapter exports using validated sentence IDs,
    and writes staging, a camera movement, and a self-contained TTI prompt for each scene. It does not
    generate images. Cancel safely; Analyze Story resumes saved checkpoints.
    After prose changes, Analyze Story clears the previous analysis, scenes, prompts,
@@ -84,10 +86,13 @@ Cancel a running audio task before saving, switching projects, or closing.
    images are preserved and reattached to matching character/place names or aliases;
    references for absent identities remain saved for future analysis.
 3. **Place** and **Character** contain canonical descriptions, stable IDs and optional
-   reference images. Description edits save automatically. Character lists only people participating in more than one
-   included scene, resolving aliases and unambiguous pronouns to the same person.
+   reference images in the shared `references/` folder. Description edits save automatically.
+   Lists show identities from the selected parts; characters recurring across parts or
+   scenes share one design, resolving aliases and unambiguous pronouns to the same person.
    One-off subjects remain available for scene staging and prompts. Select the references to condition
    generation and save. Absence of references never blocks text-only generation.
+   **Add World Building Files** attaches context to the currently checked parts only.
+   That context guides scene prompts without changing the story-wide identity catalog.
 4. **Scenes** is the authoritative editor for each still's original prose passage,
    identity links, description, staging, camera, lighting and final prompt. Select a
    scene to highlight its exact passage. List fields use one entry per line. Manual

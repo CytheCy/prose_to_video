@@ -103,9 +103,8 @@ class MainWindow(QMainWindow):
         self.story_parts = QListWidget()
         self.story_parts.itemChanged.connect(self.story_part_changed)
         self.start_page.layout().addWidget(self.story_parts, 1)
-        self.deselect_all_button, self.start_analyze_button = self.buttons(self.start_page, [
-            ('Deselect All', self.deselect_all_story_parts),
-            ('Analyze Checked Parts', self.analyze)])
+        self.deselect_all_button, = self.buttons(self.start_page, [
+            ('Deselect All', self.deselect_all_story_parts)])
         self._parts_text = ''
         self._parts_sections = []
         self.footer_status = QLabel('Create or open a project to begin')
@@ -151,7 +150,7 @@ class MainWindow(QMainWindow):
             edit.textChanged.connect(lambda k=kind:self.identity_edited(k))
             listing.currentRowChanged.connect(lambda _,k=kind:self.show_identity(k))
             if kind == 'Character':
-                page.layout().addWidget(QLabel('Characters participating in two or more included scenes.'))
+                page.layout().addWidget(QLabel('Story-wide characters appearing in the selected parts. Shared references keep their appearance consistent.'))
                 self.remove_character_button = QPushButton('Remove Character')
                 self.remove_character_button.setToolTip('Remove the selected character and its scene links.')
                 self.remove_character_button.clicked.connect(self.remove_character)
@@ -434,7 +433,6 @@ class MainWindow(QMainWindow):
         self.video_parts.setEnabled(False)
         self.story_parts.setEnabled(False)
         self.deselect_all_button.setEnabled(False)
-        self.start_analyze_button.setEnabled(False)
         self.update_undo_action()
         self.update_world_building_delete_button()
         self.worker.description = description
@@ -604,6 +602,16 @@ class MainWindow(QMainWindow):
         self.selected_story_parts.setVisible(bool(count))
         self.refresh_video_parts(selected)
         selected_ids = {item.data(Qt.UserRole) for item in selected}
+        if self.session and self.state.catalog_hash:
+            self.state.selected_part_ids = list(selected_ids)
+            for scene in self.state.scenes if self._parts_sections else []:
+                scene.production_included = scene.title != 'Excluded manuscript material' and any(
+                    section.identifier in selected_ids and section.body_start <= scene.start < section.end
+                    for section in self._parts_sections)
+            if self.state.part_world_prompts:
+                self.state.world_prompt = '\n'.join(dict.fromkeys(
+                    self.state.part_world_prompts.get(section.identifier, '')
+                    for section in self._parts_sections if section.identifier in selected_ids)).strip()
         from prose_to_video.pipeline.chapter_sources import chapter_source
         from prose_to_video.utils.prose import without_headings
         try:
@@ -620,9 +628,8 @@ class MainWindow(QMainWindow):
             self.source_view.clear_story('Choose prose parts on Start to analyze them here.')
         self.parts_help.setText(
             f'{count} of {self.story_parts.count()} parts checked. Choices save automatically. '
-            'Analyze checked parts to apply your selection; you can choose more parts later.'
+            'Characters and places use the whole story. Scenes and world building use checked parts.'
             if self._parts_sections else 'Import prose to choose which parts to work with first.')
-        self.start_analyze_button.setEnabled(bool(count) and self.worker is None)
         self.analyze_story_button.setEnabled(bool(count) and self.worker is None)
         self.deselect_all_button.setEnabled(bool(count) and self.worker is None)
 
@@ -639,7 +646,7 @@ class MainWindow(QMainWindow):
             ManuscriptStore(self.session.database).decide(
                 self._parts_text, section.identifier, section.classification,
                 item.checkState() == Qt.Checked, section.review)
-            self.update_parts_summary()
+            self.refresh()
         self.guarded(work)
 
     @property
@@ -923,7 +930,7 @@ class MainWindow(QMainWindow):
         def work():
             self.require()
             if len(world_building_files(self.session)) >= 3:
-                raise ValueError('A project can have up to three world building files')
+                raise ValueError('Selected parts can have up to three world building files')
             paths, _ = QFileDialog.getOpenFileNames(self, 'Add World Building Files')
             if not paths:
                 return
@@ -931,7 +938,7 @@ class MainWindow(QMainWindow):
             self.world_building_list.clear()
             for path in files:
                 self.world_building_list.addItem(path.name)
-            self.message(f'{len(files)} world building file(s) in project')
+            self.message(f'{len(files)} world building file(s) for the selected parts')
         self.guarded(work)
 
     def update_world_building_delete_button(self):
@@ -1086,7 +1093,7 @@ class MainWindow(QMainWindow):
     def add_identity(self,kind):
         def work():
             self.require(); name,ok=QInputDialog.getText(self,'Add '+kind,'Name')
-            if ok and name.strip():self.state.catalogs.append(Identity(kind=kind,name=name,description='',manual=True)); self.state.save(self.session.root); self.refresh()
+            if ok and name.strip():self.state.catalogs.append(Identity(kind=kind,name=name,description='',manual=True, part_ids=list(self.state.selected_part_ids))); self.state.save(self.session.root); self.refresh()
         self.guarded(work)
 
     def save_identity(self,kind):
