@@ -23,6 +23,8 @@ from prose_to_video.models.image_job import ImageRequest, ImageReference
 from prose_to_video.models.video_render import RenderPlan, RenderSettings, PlannedSegment
 from prose_to_video.pipeline.audio_transcription import source_file_hash
 from prose_to_video.pipeline.character_detection import PRONOUNS
+from prose_to_video.pipeline.character_appearance import (
+    CharacterAppearance, APPEARANCE_INSTRUCTIONS, grounded_appearances, age_version_groups)
 from prose_to_video.pipeline.scene_detection import _scene_prose
 from prose_to_video.pipeline.reference_composition import (
     CHARACTER_REFERENCE_PEOPLE_ONLY, CHARACTER_REFERENCE_SUBJECTS)
@@ -56,6 +58,9 @@ class Identity(Record):
     references: list[str] = Field(default_factory=list)  # project-relative assets
     manual: bool = False
     part_ids: list[str] = Field(default_factory=list)
+    character_appearances: list[CharacterAppearance] = Field(default_factory=list)
+    character_group_id: str | None = None
+    character_source_part_ids: list[str] = Field(default_factory=list)
 
 
 class Still(Record):
@@ -97,6 +102,7 @@ class Workflow(Record):
     image_settings: StillImageSettings = Field(default_factory=StillImageSettings)
     render_settings: RenderSettings = Field(default_factory=RenderSettings)
     catalog_hash: str = ''
+    character_appearance_analysis_version: int = 0
     selected_part_ids: list[str] = Field(default_factory=list)
     part_world_prompts: dict[str, str] = Field(default_factory=dict)
     part_world_hashes: dict[str, str] = Field(default_factory=dict)
@@ -290,9 +296,10 @@ def listed_identities(state, kind=None):
     if state.catalog_hash:
         selected = set(state.selected_part_ids)
         return [c for c in state.catalogs if (kind is None or c.kind == kind)
-                and selected.intersection(c.part_ids)
+                and (selected.intersection(c.part_ids) or c.character_group_id and
+                     selected.intersection(c.character_source_part_ids))
                 and c.name.strip().casefold() not in PRONOUNS
-                and (c.manual or c.kind == 'Place' or len(c.part_ids) > 1 or sum(
+                and (c.manual or c.kind == 'Place' or c.character_group_id or len(c.part_ids) > 1 or sum(
                     c.identifier in scene.identity_links or bool(
                         {n.casefold() for n in [c.name, *c.aliases]} &
                         {n.casefold() for n in scene.characters})
@@ -317,7 +324,86 @@ def listed_identities(state, kind=None):
             appearances[identifier].add(scene.identifier)
     return [c for c in state.catalogs if (kind is None or c.kind == kind) and
             (c.kind != 'Character' or (c.name.strip().casefold() not in PRONOUNS and
-                                      len(appearances[c.identifier]) > 1))]
+                                      (c.character_group_id or len(appearances[c.identifier]) > 1)))]
+
+
+def assign_character_versions(state, character_id, versions, sections):
+    """Apply a complete version edit to a copy, preserving one owner per part."""
+    original = next(c for c in state.catalogs if c.identifier == character_id and c.kind == 'Character')
+    group = original.character_group_id or original.identifier
+    members = [c for c in state.catalogs if c.identifier == original.identifier or c.character_group_id == group]
+    source_parts = original.character_source_part_ids or original.part_ids
+    allowed = set(source_parts)
+    if not versions or not allowed:
+        raise ValueError('This character has no recorded part appearances.')
+    assigned = [p for c in versions for p in c.part_ids]
+    if set(assigned) != allowed or len(assigned) != len(set(assigned)):
+        raise ValueError('Assign each original part to exactly one version.')
+    names = [c.name.strip().casefold() for c in versions]
+    if any(not name or name in PRONOUNS for name in names) or len(names) != len(set(names)):
+        raise ValueError('Give each version a different, nonempty character name.')
+    member_ids = {c.identifier for c in members}
+    ids = [c.identifier for c in versions]
+    if len(ids) != len(set(ids)) or not member_ids.issubset(ids) or any(
+            c.identifier in ids and c.identifier not in member_ids for c in state.catalogs):
+        raise ValueError('Invalid character versions.')
+    updated = state.model_copy(deep=True)
+    replacements = []
+    for version in versions:
+        version = version.model_copy(deep=True)
+        version.name = version.name.strip()
+        version.character_group_id = group
+        version.character_source_part_ids = list(source_parts)
+        version.manual = True
+        # Retain the prose name for identity resolution after the display name changes.
+        version.aliases = list(dict.fromkeys(n for n in [*version.aliases, original.name, *original.aliases]
+                                            if n.casefold() != version.name.casefold()))
+        replacements.append(Identity.model_validate(version.model_dump()))
+    index = min(i for i, c in enumerate(updated.catalogs) if c.identifier in member_ids)
+    updated.catalogs = [c for c in updated.catalogs if c.identifier not in member_ids]
+    updated.catalogs[index:index] = replacements
+    names = {n.casefold() for c in members for n in [c.name, *c.aliases]} - PRONOUNS
+    for scene in updated.scenes:
+        if not (member_ids.intersection(scene.identity_links) or names.intersection(n.casefold() for n in scene.characters)):
+            continue
+        part = next((s.identifier for s in sections if s.body_start <= scene.start < s.end), None)
+        owner = next((c for c in replacements if part in c.part_ids), None)
+        if owner:
+            scene.identity_links = list(dict.fromkeys([
+                *(i for i in scene.identity_links if i not in member_ids), owner.identifier]))
+            scene.characters = list(dict.fromkeys([
+                *(n for n in scene.characters if n.casefold() not in names), owner.name]))
+    return updated
+
+
+def create_detected_age_versions(state, sections):
+    """Use existing version ownership/relinking; preserve manual groups and references."""
+    for character in list(state.catalogs):
+        if character.kind != 'Character' or character.character_group_id or character.manual:
+            continue
+        if len(character.part_ids) < 2:
+            continue
+        groups = age_version_groups(character)
+        if not groups:
+            continue
+        versions = []
+        for index, (parts, observations) in enumerate(groups):
+            anchor = observations[0]
+            label = f'age {anchor.age}' if anchor.age is not None else anchor.stage.replace('_', ' ')
+            version = character.model_copy(deep=True, update={
+                'identifier': character.identifier if index == 0 else str(uuid4()),
+                'name': f'{character.name} ({label})',
+                'description': '; '.join(dict.fromkeys(o.description or o.reason for o in observations)),
+                'part_ids': [p for p in character.part_ids if p in parts],
+                # Do not copy one age's references to every inferred version.
+                'references': [],
+            })
+            versions.append(version)
+        # Keep existing reference images with the original version for user review.
+        versions[0].references = list(character.references)
+        updated = assign_character_versions(state, character.identifier, versions, sections)
+        state.catalogs = updated.catalogs
+        state.scenes = updated.scenes
 
 
 class Beat(Record):
@@ -477,8 +563,11 @@ def scene_world_prompt(state, scene):
 
 def dependency(state, scene):
     data = scene.model_dump(exclude={'final_prompt', 'negative_prompt', 'prompt_dependency', 'manual_fields'} | CAMERA_RENDER_FIELDS)
+    identities = [c.model_dump(exclude={'character_appearances'} |
+                               ({'character_group_id', 'character_source_part_ids'} if not c.character_group_id else set()))
+                  for c in state.catalogs if c.identifier in scene.identity_links]
     return source_hash(json.dumps([data, state.style, state.image_settings.width, state.image_settings.height,
-        scene_world_prompt(state, scene), [c.model_dump() for c in state.catalogs if c.identifier in scene.identity_links]], sort_keys=True))
+        scene_world_prompt(state, scene), identities], sort_keys=True))
 
 
 def prose_ranges(text, ranges, heading_ranges):
@@ -656,27 +745,33 @@ def analyze(session, state, provider, settings, cancel=None, progress=lambda *_:
     state.world_prompt = '\n'.join(dict.fromkeys(
         state.part_world_prompts.get(part_id, '') for part_id in state.selected_part_ids)).strip()
     # Catalog pass reads the entire manuscript before the scene pass.
-    for number, (part_id, batch) in enumerate(batches if state.catalog_hash != digest else []):
+    for number, (part_id, batch) in enumerate(batches if state.catalog_hash != digest or state.character_appearance_analysis_version < 1 else []):
         description = (f'Characters and places: section {number+1}/{len(batches)} · '
             'Finding names, aliases, appearances and setting details')
         result = request(f'catalog-{number}', '''Identify all participating characters and places, including one-offs and
 unambiguous pronouns. Resolve aliases/context to existing stable IDs; pronouns are never global aliases.
 Return new identities or canonical updates. Preserve physical traits, architecture, layout, materials,
 colors and spatial relationships; age/clothing/condition changes are contextual, not new identities.
-Do not invent events or relationships. Use existing IDs for existing identities. References stay empty. Return only identities participating in the supplied passages; do not return other known identities.''',
+Do not invent events or relationships. Use existing IDs for existing identities. References stay empty. Return only identities participating in the supplied passages; do not return other known identities.''' + APPEARANCE_INSTRUCTIONS,
             {'passages': batch, 'known': [c.model_dump() for c in state.catalogs]}, CatalogResult, description)
         for identity in result.identities:
             if identity.kind == 'Character':
                 if identity.name.strip().casefold() in PRONOUNS:
                     continue
                 identity.aliases = [a for a in identity.aliases if a.strip().casefold() not in PRONOUNS]
+            identity.character_appearances = grounded_appearances(identity.character_appearances, batch, part_id) if identity.kind == 'Character' else []
+            identity.character_group_id = None
+            identity.character_source_part_ids = []
             identity.part_ids = [part_id]
             identity.references = []  # Only locally imported, user-selected assets may condition jobs.
             identity.manual = False
-            existing = next((c for c in state.catalogs if c.identifier == identity.identifier or
-                set(n.casefold() for n in [c.name, *c.aliases]) & set(n.casefold() for n in [identity.name, *identity.aliases]) and c.kind == identity.kind), None)
+            existing = next((c for c in state.catalogs if (not c.character_group_id or part_id in c.part_ids) and (c.identifier == identity.identifier or
+                set(n.casefold() for n in [c.name, *c.aliases]) & set(n.casefold() for n in [identity.name, *identity.aliases]) and c.kind == identity.kind)), None)
             if existing:
                 existing.part_ids = list(dict.fromkeys([*existing.part_ids, part_id]))
+                for observation in identity.character_appearances:
+                    if observation not in existing.character_appearances:
+                        existing.character_appearances.append(observation)
                 if not existing.manual: existing.description = identity.description
                 existing.aliases = list(dict.fromkeys(existing.aliases + [a for a in [identity.name, *identity.aliases] if a != existing.name]))
             else:
@@ -691,6 +786,8 @@ Do not invent events or relationships. Use existing IDs for existing identities.
                     state.reference_identities.remove(matches[0])
                 state.catalogs.append(identity)
         state.prose_hash = digest; state.save(session.root)
+    create_detected_age_versions(state, sections)
+    state.character_appearance_analysis_version = 1
     state.catalog_hash = digest
     state.save(session.root)
     if state.analysis_scene_detection != state.scene_detection:
@@ -786,16 +883,19 @@ Do not invent events or relationships. Use existing IDs for existing identities.
             'Developing staging, composition, camera, lighting and the final image prompt')
         progress(description if included else f'Scene {sequence}/{len(planned)} · Preserving excluded prose without an image prompt')
         if included:
+            part_id = next((s.identifier for s in sections if s.body_start <= start < s.end), None)
+            scene_catalog = [c for c in state.catalogs
+                             if not c.character_group_id or part_id in c.part_ids]
             content = {'prose': _scene_prose(analysis_text, start, end, heading_ranges),
                 'earlier_context': _scene_prose(analysis_text, max(0,start-settings.overlap_chars), start, heading_ranges),
-                'catalog': [c.model_dump() for c in state.catalogs], 'style': state.style,
+                'catalog': [c.model_dump() for c in scene_catalog], 'style': state.style,
                 'world_prompt': next((state.part_world_prompts.get(s.identifier, '') for s in sections
                                       if s.body_start <= start < s.end), ''),
                 'aspect_ratio': f'{state.image_settings.width}:{state.image_settings.height}'}
             for attempt in range(3):
                 result = request(f'scene-{start}-{end}', ART_DIRECTION + '\n' + IDENTITY_LINKS,
                     content, Staging, description)
-                links, unknown = resolve_identity_links(result.identity_links, state.catalogs)
+                links, unknown = resolve_identity_links(result.identity_links, scene_catalog)
                 if not unknown:
                     result.identity_links = links
                     break

@@ -16,6 +16,9 @@ from prose_to_video.gui.main_window import MainWindow
 from prose_to_video.storage.project_files import create_project
 
 app = QApplication([])
+import podcast_splitter.app as podcast_gui
+sounds = []
+podcast_gui.completion_sound = lambda: sounds.append('chime')
 root = Path(sys.argv[1])
 window = MainWindow()
 window.load(create_project(root, 'Story'))
@@ -92,6 +95,7 @@ while panel.process and time.monotonic() < deadline:
     time.sleep(.01)
 assert panel.process is None, 'Audio worker did not finish'
 assert not errors, errors
+assert sounds == ['chime']
 exported = moved / 'output/chapters/One.wav'
 assert exported.is_file()
 assert not (root / 'external-exports').exists()

@@ -477,7 +477,7 @@ app.processEvents()
     assert result.returncode == 0, result.stderr
 
 
-def test_analyze_story_completion_sound(monkeypatch, tmp_path):
+def test_background_task_completion_sound(monkeypatch, tmp_path):
     import subprocess
     import sys
     monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
@@ -493,7 +493,7 @@ from prose_to_video.storage.project_files import create_project
 app = QApplication([])
 window = gui.MainWindow()
 sounds = []
-QApplication.beep = lambda: sounds.append('beep')
+gui.completion_sound = lambda: sounds.append('chime')
 gui.make_provider = lambda settings: None
 with TemporaryDirectory() as folder:
     window.load(create_project(Path(folder), 'Sound test'))
@@ -513,7 +513,7 @@ with TemporaryDirectory() as folder:
         QTimer.singleShot(5000, loop.quit)
         loop.exec()
         assert window.worker is None
-        assert sounds == (['beep'] if outcome == 'success' else []), outcome
+        assert sounds == ['chime'], outcome
         if outcome == 'success':
             assert 'Analysis complete' in window.footer_status.text()
 window.close()

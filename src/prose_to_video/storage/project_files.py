@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from prose_to_video.models.project import PROJECT_FORMAT_VERSION, Project, VideoSettings
 from prose_to_video.storage.database import ProjectDatabase, ProjectDatabaseError
 from prose_to_video.utils.media_info import AudioInspectionError, inspect_audio
-from prose_to_video.utils.prose import count_prose, read_prose
+from prose_to_video.utils.prose import count_prose, read_prose, trim_before_first_section
 
 
 LOGGER = logging.getLogger(__name__)
@@ -127,8 +127,11 @@ def _import_file(session: ProjectSession, source: Path, kind: str) -> ProjectSes
     try:
         with tempfile.NamedTemporaryFile(prefix=".import-", dir=source_dir, delete=False) as output:
             temporary = Path(output.name)
-            with source.open("rb") as input_file:
-                shutil.copyfileobj(input_file, output)
+            if kind == "prose":
+                output.write(trim_before_first_section(read_prose(source)).encode("utf-8"))
+            else:
+                with source.open("rb") as input_file:
+                    shutil.copyfileobj(input_file, output)
             output.flush()
             os.fsync(output.fileno())
         if kind == "prose":

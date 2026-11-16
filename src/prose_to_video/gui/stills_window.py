@@ -31,6 +31,7 @@ from prose_to_video.gui.characters_panel import ReferencePreview
 from prose_to_video.gui.ai_settings import load_ai_settings
 from prose_to_video.gui.stills_settings import StillsSettingsWindow
 from prose_to_video.pipeline.providers import make_provider
+from podcast_splitter.notifications import completion_sound
 
 
 LOGGER = logging.getLogger(__name__)
@@ -150,7 +151,18 @@ class MainWindow(QMainWindow):
             edit.textChanged.connect(lambda k=kind:self.identity_edited(k))
             listing.currentRowChanged.connect(lambda _,k=kind:self.show_identity(k))
             if kind == 'Character':
-                page.layout().addWidget(QLabel('Story-wide characters appearing in the selected parts. Shared references keep their appearance consistent.'))
+                self.character_parts = QLabel()
+                self.character_parts.setWordWrap(True)
+                self.character_parts.setTextFormat(Qt.PlainText)
+                page.layout().addWidget(self.character_parts)
+                self.character_version_reasons = QLabel()
+                self.character_version_reasons.setWordWrap(True)
+                self.character_version_reasons.setTextFormat(Qt.PlainText)
+                self.character_version_reasons.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                page.layout().addWidget(self.character_version_reasons)
+                self.add_character_version_button = QPushButton('Add Version')
+                self.add_character_version_button.clicked.connect(self.add_character_version)
+                page.layout().addWidget(self.add_character_version_button)
                 self.remove_character_button = QPushButton('Remove Character')
                 self.remove_character_button.setToolTip('Remove the selected character and its scene links.')
                 self.remove_character_button.clicked.connect(self.remove_character)
@@ -175,6 +187,10 @@ class MainWindow(QMainWindow):
                 self.next_character_reference.clicked.connect(lambda:self.change_character_reference(1))
                 edit.setMaximumHeight(140)
             else:
+                self.delete_place_button = QPushButton('Delete Place')
+                self.delete_place_button.setToolTip('Delete the selected place and its scene links. Reference images are kept.')
+                self.delete_place_button.clicked.connect(self.delete_place)
+                page.layout().addWidget(self.delete_place_button)
                 details = page; details.layout().addWidget(listing)
                 self.world_prompt_count = QLabel()
                 details.layout().addWidget(self.world_prompt_count)
@@ -461,10 +477,9 @@ class MainWindow(QMainWindow):
         if isinstance(result, Workflow):
             self.message(f'Analysis complete · {len(listed_identities(result))} recurring characters and places; '
                 f'{len(result.scenes)} scenes with staging and image prompts. Review Scenes or generate stills.')
-        if self.worker and not self.worker.cancel.is_set():
-            QApplication.beep()
 
     def finished(self):
+        completion_sound()
         self.worker.deleteLater(); self.worker=None
         self.video_parts.setEnabled(True)
         self.update_world_building_delete_button()
@@ -1020,11 +1035,29 @@ class MainWindow(QMainWindow):
             self.catalog_edits[kind].setPlainText(c.description if c else
                 self.state.world_prompt if kind == 'Place' and self.world_prompt_selected() else '')
         if kind == 'Place':
+            self.delete_place_button.setEnabled(
+                c is not None and self.session is not None and self.worker is None)
             selected = self.world_prompt_selected()
             self.world_prompt_count.setText(f'World building prompt: {len(self.state.world_prompt)}/{WORLD_PROMPT_LIMIT} characters' if selected else '')
         if kind == 'Character':
+            parts = [self.story_parts.item(i).text() for i in range(self.story_parts.count())
+                     if c and self.story_parts.item(i).data(Qt.UserRole) in c.part_ids]
+            self.character_parts.setText(
+                'Appears in:\n' + '\n'.join(parts) if parts else
+                'No part appearances recorded for this character.' if c else
+                'Select a character to see which parts they appear in.')
+            from prose_to_video.pipeline.character_appearance import appearance_reasons
+            labels = {self.story_parts.item(i).data(Qt.UserRole): self.story_parts.item(i).text()
+                      for i in range(self.story_parts.count())}
+            reasons = appearance_reasons(c, labels) if c else []
+            self.character_version_reasons.setText(
+                'Appearance evidence / reasons to consider versions:\n' + '\n'.join('• ' + r for r in reasons)
+                if reasons else 'No source-backed reasons for additional versions detected.' if c else '')
             self.remove_character_button.setEnabled(
                 c is not None and self.session is not None and self.worker is None)
+            self.add_character_version_button.setEnabled(
+                c is not None and bool(c.character_source_part_ids or c.part_ids)
+                and self.session is not None and self.worker is None)
             identifier = c.identifier if c else None
             if identifier != self._character_reference_id:
                 self.character_reference_index = 0
@@ -1058,6 +1091,48 @@ class MainWindow(QMainWindow):
     def change_character_reference(self, step):
         self.character_reference_index += step
         self.show_character_reference()
+
+    def delete_place(self):
+        def work():
+            self.require(); place = self.identity('Place')
+            if not place:
+                return
+            row = self.catalog_lists['Place'].currentRow()
+            updated = self.state.model_copy(deep=True)
+            updated.catalogs = [c for c in updated.catalogs if c.identifier != place.identifier]
+            updated.reference_identities = [c for c in updated.reference_identities
+                                            if c.identifier != place.identifier]
+            for scene in updated.scenes:
+                scene.identity_links = [identifier for identifier in scene.identity_links
+                                        if identifier != place.identifier]
+            updated.save(self.session.root)
+            self.state = updated
+            self.refresh()
+            listing = self.catalog_lists['Place']
+            listing.setCurrentRow(min(row, listing.count() - 1))
+            self.message(f'{place.name} deleted.')
+        self.guarded(work)
+
+    def add_character_version(self):
+        def work():
+            self.require()
+            character = self.identity('Character')
+            if not character:
+                return
+            from prose_to_video.gui.character_versions_dialog import CharacterVersionsDialog
+            from prose_to_video.pipeline.stills_workflow import assign_character_versions
+            parts = [(self.story_parts.item(i).data(Qt.UserRole), self.story_parts.item(i).text())
+                     for i in range(self.story_parts.count())]
+            dialog = CharacterVersionsDialog(character, self.state.catalogs, parts, self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            updated = assign_character_versions(
+                self.state, character.identifier, dialog.versions, self._parts_sections)
+            updated.save(self.session.root)
+            self.state = updated
+            self.refresh()
+            self.message('Character versions saved. Regenerate affected scene prompts to use the updated appearances.')
+        self.guarded(work)
 
     def remove_character(self):
         def work():

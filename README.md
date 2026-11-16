@@ -42,7 +42,10 @@ On **Start**, click **Create Project**, choose the parent folder and project nam
 then click **Save** to create the project folder. Use **Import Prose** and
 **Import Podcast Audio** to copy source files into the project. Existing projects
 can be opened with **File → Open Project**. The splitter and video workflow use the same copies
-in the project's `source/` folder; importing or replacing a source on Start
+in the project's `source/` folder. Prose imports discard any text before the first
+hash-prefixed heading numbered `01` (for example, `# 01 Opening`), keeping that
+heading and everything after it. Files without an `01` heading are imported unchanged;
+the original file is always preserved. Importing or replacing a source on Start
 updates the splitter. Podcast Splitter uses the sources imported on Start automatically,
 without separate file pickers. Splitter Markdown supports `.md`, `.markdown`, and `.txt` with
 hash-prefixed headings. Exported Markdown contains prose only; filenames use the heading

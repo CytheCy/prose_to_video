@@ -66,6 +66,38 @@ def test_reimport_prose_reloads_changed_file(tmp_path: Path) -> None:
     assert session.project.prose_path == "source/story.md"
 
 
+@pytest.mark.parametrize('heading', ['# 01 Opening', '## 01. Opening',
+                                     '#01', '  ### 01 — Opening ###'])
+@pytest.mark.parametrize('newline', ['\n', '\r\n'])
+def test_prose_import_removes_editorial_front_matter(tmp_path, heading, newline):
+    source = tmp_path / 'story.md'
+    prose = newline.join([heading, 'The story begins.', '# 02 Later', 'More prose.', ''])
+    original = newline.join(['\ufeff# Editing notes', 'Rewrite section 01.',
+                             '# 010 Not the first section', 'Remove this.', prose])
+    source.write_bytes(original.encode('utf-8'))
+    session = import_prose(create_project(tmp_path, 'Story'), source)
+    imported = session.root / 'source/story.md'
+    assert imported.read_bytes() == prose.encode('utf-8')
+    assert source.read_bytes() == original.encode('utf-8')
+    assert open_project(session.root).project.prose_word_count == count_prose(prose).words
+
+    # Reimporting from the project copy keeps the same cleaned manuscript.
+    session = import_prose(session, imported)
+    assert imported.read_bytes() == prose.encode('utf-8')
+
+
+@pytest.mark.parametrize('content', [
+    '# Notes\nRevise 01 before exporting.\n# 02 Opening\nStory.',
+    '# Notes\n01 is mentioned in prose.\n# 010 Opening\nStory.',
+    '\ufeff# 01 Opening\r\nStory.\r\n',
+])
+def test_prose_import_without_front_matter_to_trim_preserves_bytes(tmp_path, content):
+    source = tmp_path / 'story.md'
+    source.write_bytes(content.encode('utf-8'))
+    session = import_prose(create_project(tmp_path, 'Story'), source)
+    assert (session.root / 'source/story.md').read_bytes() == source.read_bytes()
+
+
 @pytest.mark.parametrize('failure', ['invalid_prose', 'database'])
 def test_failed_prose_reimport_preserves_previous_copy(tmp_path, monkeypatch, failure):
     source = tmp_path / 'story.txt'

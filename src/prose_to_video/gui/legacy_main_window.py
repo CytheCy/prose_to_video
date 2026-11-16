@@ -662,7 +662,8 @@ class MainWindow(QMainWindow):
         self.places_panel.busy = busy
         self.places_panel.detect_button.setEnabled(bool(session and session.file_status()[0]) and not busy)
         self.places_panel.cancel_button.setEnabled(isinstance(self._task, PlaceTask))
-        for widget in (self.places_panel.save_button, self.places_panel.name_edit, self.places_panel.description_edit):
+        for widget in (self.places_panel.save_button, self.places_panel.delete_button,
+                       self.places_panel.name_edit, self.places_panel.description_edit):
             widget.setEnabled(self.places_panel.current_place() is not None and not busy)
         prose_available = bool(session and session.file_status()[0])
         audio_available = bool(session and session.file_status()[1])

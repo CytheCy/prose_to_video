@@ -13,6 +13,7 @@ from prose_to_video.pipeline.place_detection import (detect_places, link_places,
 from prose_to_video.pipeline.providers import AISettings
 from prose_to_video.storage.project_files import create_project
 from prose_to_video.storage.visual_library import VisualLibrary
+from prose_to_video.storage.database import ProjectDatabaseError
 
 TEXT = "Marvin's street in 2020 has brick houses.\nInside the shoe factory, machines clatter.\nIn another room, leather is stacked.\nMarvin's street in 2030 has empty lots."
 
@@ -117,6 +118,62 @@ def test_place_editor_and_navigation(tmp_path):
     panel.set_library(None)
     assert panel.list_widget.count() == panel.scene_list.count() == 0
     assert not panel.save_button.isEnabled()
+    assert not panel.delete_button.isEnabled()
+
+
+def test_delete_place_preserves_scenes_and_other_places(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    session, library = setup_places(tmp_path)
+    scenes = save_scenes(session)
+    places = detect_places(TEXT, library, Provider(), AISettings())
+    panel = PlacesPanel(); panel.set_library(library)
+    panel.list_widget.setCurrentRow(1)
+    changed = []; panel.changed.connect(lambda: changed.append(True))
+
+    panel.busy = True
+    panel._selected()
+    assert not panel.delete_button.isEnabled()
+    panel._delete()
+    assert library.entity(places[1].identifier) is not None
+    panel.busy = False
+    panel._selected()
+    assert panel.delete_button.isEnabled()
+    panel.delete_button.click()
+
+    assert changed == [True]
+    assert library.entity(places[1].identifier) is None
+    assert library.scenes_for(places[1].identifier) == []
+    assert [p.identifier for p in listed_places(VisualLibrary(session.root))] == [
+        places[0].identifier, places[2].identifier]
+    assert session.database.load_scenes()[1] == scenes
+    assert panel.list_widget.count() == 2
+    assert panel.current_place().identifier != places[1].identifier
+    assert panel.name_edit.text() == panel.current_place().name
+
+    panel.delete_button.click()
+    panel.delete_button.click()
+    assert panel.list_widget.count() == panel.scene_list.count() == 0
+    assert panel.name_edit.text() == panel.description_edit.toPlainText() == ''
+    assert not panel.delete_button.isEnabled()
+    assert not panel.save_button.isEnabled()
+
+
+def test_delete_place_reports_failure(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    _, library = setup_places(tmp_path)
+    detect_places(TEXT, library, Provider(), AISettings())
+    panel = PlacesPanel(); panel.set_library(library)
+    errors = []; panel.error.connect(errors.append)
+    changed = []; panel.changed.connect(lambda: changed.append(True))
+
+    def fail(*args, **kwargs):
+        raise ProjectDatabaseError('Could not delete place')
+
+    monkeypatch.setattr(library, 'delete_entity', fail)
+    panel.delete_button.click()
+    assert errors == ['Could not delete place']
+    assert changed == []
+    assert panel.list_widget.count() == len(listed_places(library)) == 3
 
 
 def test_chunked_recurring_place_merges_details_and_covers_source(tmp_path):

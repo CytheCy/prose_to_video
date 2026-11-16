@@ -27,7 +27,7 @@ prose-to-video = "prose_to_video.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-podcast_splitter = ["LICENSE"]
+podcast_splitter = ["LICENSE", "completion.wav"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

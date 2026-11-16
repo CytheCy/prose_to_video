@@ -47,6 +47,21 @@ def heading_title(line: str) -> str | None:
     return match['title'].strip() if match else None
 
 
+def trim_before_first_section(text: str) -> str:
+    """Drop editorial front matter before the first heading numbered 01.
+
+    Leave manuscripts without that heading unchanged, and preserve the exact
+    heading, prose, and line endings in manuscripts that have it.
+    """
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        title = heading_title(line)
+        if title is not None and re.match(r'01(?:$|\s|[.):\-–—])', title):
+            return text[offset:]
+        offset += len(line)
+    return text
+
+
 def without_headings(text: str) -> str:
     return ''.join(line for line in text.splitlines(keepends=True)
                    if heading_title(line) is None)

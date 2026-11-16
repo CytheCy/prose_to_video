@@ -34,6 +34,8 @@ class PlacesPanel(QGroupBox):
         self.scene_list = QListWidget()
         self.open_button = QPushButton('Open Selected Scene')
         self.save_button = QPushButton('Save Place Details')
+        self.delete_button = QPushButton('Delete Place')
+        self.delete_button.setToolTip('Delete the selected place and its associations. Scenes and images are kept.')
         layout = QVBoxLayout(self)
         layout.addWidget(self.detect_button)
         layout.addWidget(self.cancel_button)
@@ -44,6 +46,7 @@ class PlacesPanel(QGroupBox):
         form.addRow('Description:', self.description_edit)
         layout.addLayout(form)
         layout.addWidget(self.save_button)
+        layout.addWidget(self.delete_button)
         layout.addWidget(QLabel('Scenes at this place (double-click to open):'))
         layout.addWidget(self.scene_list, 1)
         layout.addWidget(self.open_button)
@@ -51,6 +54,7 @@ class PlacesPanel(QGroupBox):
         self.cancel_button.clicked.connect(self.cancel_requested)
         self.list_widget.currentRowChanged.connect(self._selected)
         self.save_button.clicked.connect(self._save)
+        self.delete_button.clicked.connect(self._delete)
         self.scene_list.itemDoubleClicked.connect(lambda _: self._open_scene())
         self.scene_list.currentRowChanged.connect(lambda _: self.open_button.setEnabled(self.scene_list.currentItem() is not None))
         self.open_button.clicked.connect(self._open_scene)
@@ -82,7 +86,7 @@ class PlacesPanel(QGroupBox):
         place = self.current_place()
         self.name_edit.setText(place.name if place else '')
         self.description_edit.setPlainText(place.description if place else '')
-        for widget in (self.name_edit, self.description_edit, self.save_button):
+        for widget in (self.name_edit, self.description_edit, self.save_button, self.delete_button):
             widget.setEnabled(place is not None and not self.busy)
         self.scene_list.clear()
         if place and self.library:
@@ -110,6 +114,18 @@ class PlacesPanel(QGroupBox):
                 'place_description_edited': place.place_description_edited or self.description_edit.toPlainText() != place.description}))
             self.refresh()
             self.status.setText('Place details saved.')
+            self.changed.emit()
+        except (ValueError, ProjectDatabaseError) as exc:
+            self.error.emit(str(exc))
+
+    def _delete(self):
+        place = self.current_place()
+        if not place or not self.library or self.busy:
+            return
+        try:
+            self.library.delete_entity(place.identifier, confirmed=True)
+            self.refresh()
+            self.status.setText(f'{place.name} deleted.')
             self.changed.emit()
         except (ValueError, ProjectDatabaseError) as exc:
             self.error.emit(str(exc))

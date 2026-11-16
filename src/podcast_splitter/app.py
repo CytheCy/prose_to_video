@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from .core import Project, parse_prose, validate_export, fingerprint, export_names
+from .notifications import completion_sound
 
 
 def clock(seconds):
@@ -819,6 +820,7 @@ class Window(QMainWindow):
     def worker_finished(self, code, status):
         if not self.process:
             return
+        completion_sound()
         self.read_stdout()
         self.read_stderr()
         if code == 0 and self.worker_done and not self.cancelled:
