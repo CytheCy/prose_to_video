@@ -122,7 +122,9 @@ def test_camera_mapping_and_aspect_filters():
     c=resolve_camera('Pull back',settings,(800,600),report,'s','x')
     assert c.end_zoom<c.start_zoom
     for label in ['Slow pan left','Slow pan right','Tilt up','Tilt down']:
-        assert resolve_camera(label,settings,(800,600),report,'s','x').kind==label
+        c=resolve_camera(label,settings,(800,600),report,'s','x')
+        assert c.kind==label
+        assert (c.start_zoom, c.end_zoom) == pytest.approx((1.36, 1.36))
     assert resolve_camera('Tracking',settings,(800,600),report,'s','x').kind=='Static'
     assert resolve_camera('Push in',settings,(100,100),report,'s','x').kind=='Static'
     segment=PlannedSegment(scene_id='s',shot_id='x',asset_kind='placeholder',source_start=0,source_end=1,

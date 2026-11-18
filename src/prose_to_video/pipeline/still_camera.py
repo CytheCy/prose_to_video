@@ -1,11 +1,19 @@
 """Resolve movement IDs into bounded viewports. Directions refer to the camera."""
 import hashlib
-from prose_to_video.models.video_render import CameraFrame
+from prose_to_video.models.video_render import CameraFrame, RenderSettings
+
+
+# At full pan, each unit of zoom above 1 moves the image by one frame width or height.
+STILL_MOTION_SCALE = 3
+
+
+def still_motion_amount(settings: RenderSettings) -> float:
+    return {'None': 0, 'Subtle': .06, 'Moderate': .12, 'Strong': .20,
+            'Custom': settings.custom_motion}[settings.motion_intensity]
 
 
 def still_camera(label, settings, focal_x=.5, focal_y=.5, seed=''):
-    amount = {'None': 0, 'Subtle': .06, 'Moderate': .12, 'Strong': .20,
-              'Custom': settings.custom_motion}[settings.motion_intensity]
+    amount = still_motion_amount(settings) * STILL_MOTION_SCALE
     if label == 'static_hold' or not amount:
         return CameraFrame()
     frame = CameraFrame(kind=label)

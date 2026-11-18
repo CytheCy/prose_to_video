@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 from PySide6.QtGui import QImageReader
 
+from prose_to_video.models.camera_movement import CAMERA_MOVEMENT_IDS
 from prose_to_video.models.video_render import (CameraFrame, PlannedSegment, RenderPlan,
     RenderSettings, ValidationReport)
 from prose_to_video.storage.generated_images import ImageStore
@@ -13,6 +14,7 @@ from prose_to_video.storage.image_export import visual_timeline_manifest
 from prose_to_video.storage.video_renders import VideoRenderStore
 from prose_to_video.storage.generated_videos import VideoStore, hash_file, validate_video
 from prose_to_video.pipeline.motion_prompt_generation import source_fingerprint, resolve_ending_image, motion_references, workflow_fingerprint
+from prose_to_video.pipeline.still_camera import STILL_MOTION_SCALE, still_camera, still_motion_amount
 from prose_to_video.utils.prose import read_prose
 
 
@@ -32,11 +34,8 @@ def frame_boundary(seconds: float, fps: int) -> int:
 def resolve_camera(label: str, settings: RenderSettings, image_size: tuple[int, int] | None,
                    report: ValidationReport, scene_id: str, shot_id: str,
                    approved: dict[str, float] | None = None) -> CameraFrame:
-    if not approved:
-        from prose_to_video.models.camera_movement import CAMERA_MOVEMENT_IDS
-        from prose_to_video.pipeline.still_camera import still_camera
-        if label in CAMERA_MOVEMENT_IDS:
-            return still_camera(label, settings, seed=shot_id)
+    if not approved and label in CAMERA_MOVEMENT_IDS:
+        return still_camera(label, settings, seed=shot_id)
     if approved:
         if image_size:
             iw, ih = image_size
@@ -55,17 +54,17 @@ def resolve_camera(label: str, settings: RenderSettings, image_size: tuple[int, 
         report.add('warning', 'motion_fallback', f'{label} cannot be reproduced from a flat still; using static framing', scene_id, shot_id)
         return CameraFrame(fallback=label)
     dx, dy, dz = direction[label]
-    amount = {'None': 0, 'Subtle': 0.06, 'Moderate': 0.12, 'Strong': 0.20,
-              'Custom': settings.custom_motion}[settings.motion_intensity]
+    amount = still_motion_amount(settings)
     if label == 'Static' or amount == 0:
         return CameraFrame()
-    # A cropped source needs spare pixels around the output. Limit upscaling to 2x.
+    # Keep the existing source-resolution threshold for enabling a legacy move.
     if image_size:
         iw, ih = image_size
         base = max(settings.width / iw, settings.height / ih) if settings.fit_policy == 'crop' else min(settings.width / iw, settings.height / ih)
         if base > 2 or base * (1 + amount) > 2:
             report.add('warning', 'motion_resolution', 'Image resolution is too low for safe movement; using static framing', scene_id, shot_id)
             return CameraFrame(fallback='Insufficient image resolution')
+    amount *= STILL_MOTION_SCALE
     if dx or dy:
         # A moving viewport needs overscan. The renderer scales to this zoom first.
         zoom = 1 + amount

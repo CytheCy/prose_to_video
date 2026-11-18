@@ -607,6 +607,9 @@ def test_direct_workflow_exports_real_video(tmp_path):
     state.render_settings=state.render_settings.model_copy(update={'width':64,'height':64,'frame_rate':10,'preset':'ultrafast'})
     plan=render_plan(session,state);out=session.root/'output'/'test.mp4'
     assert [s.camera.kind for s in plan.segments] == ['zoom_in', 'pan_left']
+    zoom, pan = (segment.camera for segment in plan.segments)
+    assert (zoom.start_zoom, zoom.end_zoom) == pytest.approx((1, 1.18))
+    assert (pan.start_zoom, pan.end_zoom) == pytest.approx((1.18, 1.18))
     assert all(s.production_mode == 'Camera Motion' and s.fit_policy == 'crop' for s in plan.segments)
     FFmpegRenderer(session.root).render(plan,out)
     info=probe(out)

@@ -32,8 +32,8 @@ def test_movement_does_not_stale_still_prompt():
 @pytest.mark.parametrize('label', CAMERA_MOVEMENT_IDS)
 def test_camera_path_stays_bounded(label):
     camera = still_camera(label, RenderSettings(motion_intensity='Strong'), .1, .9, 'scene')
-    assert 1 <= camera.start_zoom <= 1.3
-    assert 1 <= camera.end_zoom <= 1.3
+    assert 1 <= camera.start_zoom < 2
+    assert 1 <= camera.end_zoom < 2
     for name in ('start_x', 'end_x', 'start_y', 'end_y'):
         assert 0 <= getattr(camera, name) <= 1
     if 'pan_left' in label or label == 'pan_left':
